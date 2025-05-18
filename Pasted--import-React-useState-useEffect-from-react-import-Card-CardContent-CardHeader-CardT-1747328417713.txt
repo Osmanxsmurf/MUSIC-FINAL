@@ -1,0 +1,1984 @@
+
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Badge } from '@/components/ui/badge';
+import { Slider } from '@/components/ui/slider';
+import { SongCard } from './SongCard';
+import { MusicPlayerContext } from './Layout';
+import { MoodSelector } from './MoodSelector';
+import { MOODS } from '@/lib/constants';
+import { getTopTracksByTag, getSimilarTracks } from '@/lib/lastfm-api';
+import { searchYouTube } from '@/lib/youtube-api';
+import { fetchAllSongs, fetchSongsByMood } from '@/lib/xata';
+import { useToast } from '@/hooks/use-toast';
+import { Sparkles, Music, Zap, RefreshCw, ThumbsUp, Heart, History, Users, User, Search } from 'lucide-react';
+import type { Song } from '@shared/schema';
+interface RecommendationEngineProps {
+  className?: string;
+  initialMood?: string;
+  recentlyPlayedSongs?: Song[];
+  likedSongs?: Song[];
+}
+export function RecommendationEngine({ 
+  className, 
+  initialMood,
+  recentlyPlayedSongs = [],
+  likedSongs = []
+}: RecommendationEngineProps) {
+  const { playSong } = React.useContext(MusicPlayerContext);
+  const [activeTab, setActiveTab] = useState('mood');
+  const [selectedMood, setSelectedMood] = useState(initialMood || '');
+  const [recommendations, setRecommendations] = useState<Song[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [varietyLevel, setVarietyLevel] = useState(50); // 0-100 arasında çeşitlilik seviyesi
+  const [apiRequestCount, setApiRequestCount] = useState(0);
+  const [queryText, setQueryText] = useState('');
+  const { toast } = useToast();
+  
+  // API istek sayısı sınırı
+  const API_REQUEST_LIMIT = 10;
+  
+  // Ruh haline göre öneriler
+  const getMoodRecommendations = async (mood: string) => {
+    setLoading(true);
+    
+    try {
+      // Veritabanından belirli bir ruh haline göre şarkılar
+      const moodSongs = await fetchSongsByMood(mood);
+      
+      // Eğer yeterli sayıda şarkı bulunamazsa, Last.fm'den tür bazlı öneriler al
+      if (moodSongs.length < 3 && apiRequestCount < API_REQUEST_LIMIT) {
+        // Last.fm'deki benzer türlerle eşleştir
+        const lastfmTag = mapMoodToLastfmTag(mood);
+        
+        // API istek sayısını artır
+        setApiRequestCount(prev => prev + 1);
+        
+        const lastfmTracks = await getTopTracksByTag(lastfmTag, 5);
+        
+        // Last.fm'den gelen önerileri yerel veritabanındaki şarkılarla eşleştir
+        const allSongs = await fetchAllSongs();
+        const matchedSongs = lastfmTracks.flatMap(track => {
+          // Benzer şarkıları bul (başlık ve sanatçı adı benzerliğine göre)
+          return allSongs.filter(song => 
+            similarity(song.title.toLowerCase(), track.name.toLowerCase()) > 0.6 ||
+            similarity(song.artist.toLowerCase(), track.artist.toLowerCase()) > 0.7
+          );
+        });
+        
+        // Tüm şarkıları birleştir ve filtreleme/karıştırma yap
+        const allRecommendations = [...moodSongs, ...matchedSongs];
+        
+        // Eğer hala yeterli şarkı yoksa, genel bir şarkı listesi döndür
+        if (allRecommendations.length < 3) {
+          // Veritabanındaki tüm şarkıları karıştırarak 10 tane al
+          const randomSongs = shuffleArray(allSongs).slice(0, 10);
+          setRecommendations(randomSongs);
+        } else {
+          // Var olan önerileri karıştır
+          setRecommendations(shuffleArray(allRecommendations));
+        }
+      } else {
+        // Yeterli şarkı bulundu, ruh haline göre şarkıları göster
+        setRecommendations(moodSongs);
+      }
+    } catch (error) {
+      console.error('Öneri getirme hatası:', error);
+      toast({
+        title: 'Öneri Hatası',
+        description: 'Öneriler yüklenirken bir sorun oluştu.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Beğenilen ve dinlenen şarkılara göre öneriler
+  const getPersonalizedRecommendations = async () => {
+    setLoading(true);
+    
+    try {
+      if (likedSongs.length === 0 && recentlyPlayedSongs.length === 0) {
+        // Beğenilen veya son dinlenen şarkı yoksa, ruh hali bazlı önerilere geç
+        if (selectedMood) {
+          await getMoodRecommendations(selectedMood);
+        } else {
+          // Hiçbir şey yoksa rastgele öneriler göster
+          const allSongs = await fetchAllSongs();
+          setRecommendations(shuffleArray(allSongs).slice(0, 10));
+        }
+        return;
+      }
+      
+      // Beğenilen şarkılar veya son dinlenen şarkıların türlerini/sanatçılarını analiz et
+      const sourceSongs = likedSongs.length > 0 ? likedSongs : recentlyPlayedSongs;
+      
+      // Türler ve sanatçılar için frekans analizi
+      const genreCounts: Record<string, number> = {};
+      const artistCounts: Record<string, number> = {};
+      
+      sourceSongs.forEach(song => {
+        if (song.genre) {
+          genreCounts[song.genre] = (genreCounts[song.genre] || 0) + 1;
+        }
+        
+        artistCounts[song.artist] = (artistCounts[song.artist] || 0) + 1;
+      });
+      
+      // En popüler tür ve sanatçıyı bul
+      const sortedGenres = Object.entries(genreCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([genre]) => genre);
+      
+      const sortedArtists = Object.entries(artistCounts)
+        .sort((a, b) => b[1] - a[1])
+        .map(([artist]) => artist);
+      
+      // Tüm şarkıları getir
+      const allSongs = await fetchAllSongs();
+      
+      // Farklı türlere ağırlık ver (çeşitlilik seviyesine göre)
+      const diversityFactor = varietyLevel / 100; // 0-1 arası normalize et
+      
+      // Şarkıları puanla
+      const scoredSongs = allSongs.map(song => {
+        let score = 0;
+        
+        // Tür puanı
+        if (song.genre && sortedGenres.includes(song.genre)) {
+          const genreIndex = sortedGenres.indexOf(song.genre);
+          score += (sortedGenres.length - genreIndex) * (1 - diversityFactor);
+        }
+        
+        // Sanatçı puanı
+        if (sortedArtists.includes(song.artist)) {
+          const artistIndex = sortedArtists.indexOf(song.artist);
+          score += (sortedArtists.length - artistIndex) * (1 - diversityFactor);
+        }
+        
+        // Çeşitlilik faktörü
+        score += Math.random() * diversityFactor * 5;
+        
+        // Zaten dinlenen şarkılar için ceza
+        const isAlreadyListened = sourceSongs.some(s => s.id === song.id);
+        if (isAlreadyListened) {
+          score -= 5;
+        }
+        
+        return { song, score };
+      });
+      
+      // Puanlara göre sırala ve en yüksek puanlıları seç
+      const sortedRecommendations = scoredSongs
+        .sort((a, b) => b.score - a.score)
+        .map(({ song }) => song)
+        .slice(0, 10);
+      
+      setRecommendations(sortedRecommendations);
+    } catch (error) {
+      console.error('Kişisel öneri hatası:', error);
+      toast({
+        title: 'Öneri Hatası',
+        description: 'Kişiselleştirilmiş öneriler yüklenirken bir sorun oluştu.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Benzer şarkılar önerisi
+  const getSimilarSongRecommendations = async () => {
+    if (recentlyPlayedSongs.length === 0) {
+      toast({
+        title: 'Öneri Yapılamıyor',
+        description: 'Benzer şarkı önerisi için yakın zamanda dinlediğiniz bir şarkı olmalı.',
+        variant: 'default',
+      });
+      return;
+    }
+    
+    setLoading(true);
+    
+    try {
+      // Son dinlenen şarkı
+      const lastPlayed = recentlyPlayedSongs[0];
+      
+      // API istek sınırını kontrol et
+      if (apiRequestCount >= API_REQUEST_LIMIT) {
+        // API sınırı aşıldıysa veritabanından rastgele şarkılar göster
+        const allSongs = await fetchAllSongs();
+        const sameMoodSongs = allSongs.filter(song => 
+          song.mood && lastPlayed.mood && 
+          song.mood.some(m => lastPlayed.mood?.includes(m)) &&
+          song.id !== lastPlayed.id
+        );
+        
+        if (sameMoodSongs.length > 0) {
+          setRecommendations(shuffleArray(sameMoodSongs).slice(0, 10));
+        } else {
+          setRecommendations(shuffleArray(allSongs).filter(s => s.id !== lastPlayed.id).slice(0, 10));
+        }
+        return;
+      }
+      
+      // API istek sayısını artır
+      setApiRequestCount(prev => prev + 1);
+      
+      // Last.fm API'den benzer şarkılar al
+      const similarTracks = await getSimilarTracks(lastPlayed.artist, lastPlayed.title, 10);
+      
+      // Veritabanından tüm şarkıları al
+      const allSongs = await fetchAllSongs();
+      
+      // Benzer şarkıları eşleştir
+      const matchedSongs = similarTracks.flatMap(track => {
+        return allSongs.filter(song => 
+          (similarity(song.title.toLowerCase(), track.name.toLowerCase()) > 0.6 ||
+           similarity(song.artist.toLowerCase(), track.artist.toLowerCase()) > 0.7) &&
+          song.id !== lastPlayed.id
+        );
+      });
+      
+      if (matchedSongs.length > 0) {
+        setRecommendations(matchedSongs);
+      } else {
+        // Eşleşme bulunamazsa aynı türdeki şarkıları göster
+        const sameMoodSongs = allSongs.filter(song => 
+          song.mood && lastPlayed.mood && 
+          song.mood.some(m => lastPlayed.mood?.includes(m)) &&
+          song.id !== lastPlayed.id
+        );
+        
+        if (sameMoodSongs.length > 0) {
+          setRecommendations(shuffleArray(sameMoodSongs).slice(0, 10));
+        } else {
+          // Son çare: rastgele şarkılar
+          setRecommendations(shuffleArray(allSongs).filter(s => s.id !== lastPlayed.id).slice(0, 10));
+        }
+      }
+    } catch (error) {
+      console.error('Benzer şarkı önerisi hatası:', error);
+      toast({
+        title: 'Öneri Hatası',
+        description: 'Benzer şarkılar getirilirken bir sorun oluştu.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // YouTube video önerileri
+  const getYouTubeRecommendations = async () => {
+    if (apiRequestCount >= API_REQUEST_LIMIT) {
+      toast({
+        title: 'API Sınırı',
+        description: 'YouTube API kullanım sınırına ulaşıldı. Lütfen daha sonra tekrar deneyin.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    
+    // Sorgu metnini belirle
+    let query = queryText;
+    if (!query) {
+      if (selectedMood) {
+        query = `${selectedMood} music`;
+      } else if (recentlyPlayedSongs.length > 0) {
+        const lastPlayed = recentlyPlayedSongs[0];
+        query = `${lastPlayed.artist} ${lastPlayed.title} music`;
+      } else {
+        query = 'recommended music 2023';
+      }
+    }
+    
+    setLoading(true);
+    
+    try {
+      // API istek sayısını artır
+      setApiRequestCount(prev => prev + 1);
+      
+      // YouTube API'den videolar al
+      const videoResults = await searchYouTube(query, 10);
+      
+      // Sonuçları YouTube video ID'leri ile işle ve gerekirse yeni bir bileşen oluştur
+      // Bu projede şu anda tam entegrasyon yapılmıyor, sadece temel yapı oluşturuluyor
+      
+      // Ancak, önerilen şarkıları veritabanından getirip gösterelim
+      const allSongs = await fetchAllSongs();
+      const querySongs = allSongs.filter(song => 
+        song.title.toLowerCase().includes(query.toLowerCase()) ||
+        song.artist.toLowerCase().includes(query.toLowerCase()) ||
+        (song.genre && song.genre.toLowerCase().includes(query.toLowerCase()))
+      );
+      
+      if (querySongs.length > 0) {
+        setRecommendations(querySongs);
+      } else {
+        // Eşleşme bulunamazsa rastgele şarkılar göster
+        setRecommendations(shuffleArray(allSongs).slice(0, 10));
+      }
+    } catch (error) {
+      console.error('YouTube öneri hatası:', error);
+      toast({
+        title: 'Öneri Hatası',
+        description: 'YouTube önerileri getirilirken bir sorun oluştu.',
+        variant: 'destructive',
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Seçilen sekme değiştiğinde önerileri güncelle
+  useEffect(() => {
+    switch (activeTab) {
+      case 'mood':
+        if (selectedMood) {
+          getMoodRecommendations(selectedMood);
+        }
+        break;
+      case 'personalized':
+        getPersonalizedRecommendations();
+        break;
+      case 'similar':
+        getSimilarSongRecommendations();
+        break;
+      case 'youtube':
+        getYouTubeRecommendations();
+        break;
+    }
+  }, [activeTab, selectedMood]);
+  
+  // Ruh hali değiştiğinde önerileri güncelle
+  const handleMoodSelect = (mood: string) => {
+    setSelectedMood(mood);
+    if (activeTab === 'mood') {
+      getMoodRecommendations(mood);
+    }
+  };
+  
+  // Çeşitlilik seviyesi değiştiğinde önerileri güncelle
+  const handleVarietyChange = (value: number[]) => {
+    setVarietyLevel(value[0]);
+    if (activeTab === 'personalized') {
+      // Çeşitlilik değiştiğinde tavsiyeyi anında güncelleme
+      getPersonalizedRecommendations();
+    }
+  };
+  
+  // YouTube sorgusu değiştiğinde
+  const handleQuerySubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (activeTab === 'youtube') {
+      getYouTubeRecommendations();
+    }
+  };
+  
+  return (
+    <Card className={`overflow-hidden ${className}`}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Sparkles className="h-5 w-5 text-primary" />
+          Akıllı Müzik Önerileri
+        </CardTitle>
+        <CardDescription>
+          Ruh halinize ve dinleme geçmişinize göre kişiselleştirilmiş öneriler
+        </CardDescription>
+      </CardHeader>
+      
+      <CardContent className="space-y-6">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+          <TabsList className="w-full">
+            <TabsTrigger value="mood" className="flex-1 gap-1">
+              <Music className="h-4 w-4" /> Ruh Hali
+            </TabsTrigger>
+            <TabsTrigger value="personalized" className="flex-1 gap-1">
+              <Heart className="h-4 w-4" /> Kişisel
+            </TabsTrigger>
+            <TabsTrigger value="similar" className="flex-1 gap-1">
+              <History className="h-4 w-4" /> Benzer
+            </TabsTrigger>
+            <TabsTrigger value="youtube" className="flex-1 gap-1">
+              <Zap className="h-4 w-4" /> YouTube
+            </TabsTrigger>
+          </TabsList>
+          
+          {/* Ruh Hali Sekmesi */}
+          <TabsContent value="mood">
+            <div className="space-y-4">
+              <div className="mb-4">
+                <h3 className="text-sm font-medium mb-2">Ruh Halinizi Seçin</h3>
+                <div className="flex flex-wrap gap-2">
+                  {MOODS.map((mood) => (
+                    <Badge 
+                      key={String(mood.id)}
+                      variant={selectedMood === mood.id ? "default" : "outline"}
+                      className="cursor-pointer capitalize"
+                      onClick={() => handleMoodSelect(mood.id as string)}
+                    >
+                      {mood.label as React.ReactNode}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+              
+              <div className="space-y-4">
+                <h3 className="text-sm font-medium">Önerilen Şarkılar</h3>
+                {loading ? (
+                  <div className="text-center py-8">
+                    <svg className="animate-spin h-8 w-8 text-primary mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p className="mt-2 text-sm text-muted-foreground">Öneriler yükleniyor...</p>
+                  </div>
+                ) : recommendations.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {recommendations.slice(0, 6).map((song) => (
+                      <SongCard 
+                        key={song.id}
+                        song={song}
+                        onClick={() => playSong(song)}
+                        isCompact
+                      />
+                    ))}
+                  </div>
+                ) : selectedMood ? (
+                  <div className="text-center py-8">
+                    <Music className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+                    <p className="text-muted-foreground">Bu ruh hali için öneri bulunamadı.</p>
+                    <p className="text-xs text-muted-foreground mt-1">Lütfen başka bir ruh hali seçin.</p>
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <Sparkles className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+                    <p className="text-muted-foreground">Öneriler için bir ruh hali seçin.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </TabsContent>
+          
+          {/* Kişisel Öneriler Sekmesi */}
+          <TabsContent value="personalized">
+            <div className="space-y-4">
+              <div className="mb-4">
+                <h3 className="text-sm font-medium mb-2">Çeşitlilik Seviyesi</h3>
+                <div className="flex items-center gap-4">
+                  <span className="text-xs text-muted-foreground">Benzer</span>
+                  <Slider
+                    value={[varietyLevel]}
+                    min={0}
+                    max={100}
+                    step={10}
+                    className="flex-1"
+                    onValueChange={handleVarietyChange}
+                  />
+                  <span className="text-xs text-muted-foreground">Farklı</span>
+                </div>
+              </div>
+              
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="text-sm font-medium">Sizin İçin Öneriler</h3>
+                  <Button 
+                    variant="ghost" 
+                    size="sm" 
+                    className="flex items-center gap-1"
+                    onClick={getPersonalizedRecommendations}
+                  >
+                    <RefreshCw className="h-3 w-3" />
+                    <span className="text-xs">Yenile</span>
+                  </Button>
+                </div>
+                
+                {loading ? (
+                  <div className="text-center py-8">
+                    <svg className="animate-spin h-8 w-8 text-primary mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p className="mt-2 text-sm text-muted-foreground">Öneriler yükleniyor...</p>
+                  </div>
+                ) : recommendations.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {recommendations.slice(0, 6).map((song) => (
+                      <SongCard 
+                        key={song.id}
+                        song={song}
+                        onClick={() => playSong(song)}
+                        isCompact
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <Heart className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+                    <p className="text-muted-foreground">Kişiselleştirilmiş öneriler için daha fazla şarkı dinleyin.</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </TabsContent>
+          
+          {/* Benzer Şarkılar Sekmesi */}
+          <TabsContent value="similar">
+            <div className="space-y-4">
+              {recentlyPlayedSongs.length > 0 ? (
+                <>
+                  <div className="mb-4">
+                    <h3 className="text-sm font-medium mb-2">Son Dinlenen Şarkı</h3>
+                    <SongCard 
+                      song={recentlyPlayedSongs[0]}
+                      onClick={() => playSong(recentlyPlayedSongs[0])}
+                    />
+                  </div>
+                  
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-sm font-medium">Benzer Şarkılar</h3>
+                      <Button 
+                        variant="ghost" 
+                        size="sm" 
+                        className="flex items-center gap-1"
+                        onClick={getSimilarSongRecommendations}
+                      >
+                        <RefreshCw className="h-3 w-3" />
+                        <span className="text-xs">Yenile</span>
+                      </Button>
+                    </div>
+                    
+                    {loading ? (
+                      <div className="text-center py-8">
+                        <svg className="animate-spin h-8 w-8 text-primary mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <p className="mt-2 text-sm text-muted-foreground">Benzer şarkılar yükleniyor...</p>
+                      </div>
+                    ) : recommendations.length > 0 ? (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {recommendations.slice(0, 6).map((song) => (
+                          <SongCard 
+                            key={song.id}
+                            song={song}
+                            onClick={() => playSong(song)}
+                            isCompact
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-8">
+                        <Music className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+                        <p className="text-muted-foreground">Benzer şarkı bulunamadı.</p>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-12">
+                  <History className="h-12 w-12 text-muted-foreground mx-auto mb-3" />
+                  <p className="text-muted-foreground">Benzer şarkı önerileri için önce bir şarkı dinleyin.</p>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+          
+          {/* YouTube Sekmesi */}
+          <TabsContent value="youtube">
+            <div className="space-y-4">
+              <form onSubmit={handleQuerySubmit} className="flex gap-2">
+                <input
+                  type="text"
+                  className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  placeholder="YouTube'da ara..."
+                  value={queryText}
+                  onChange={(e) => setQueryText(e.target.value)}
+                />
+                <Button 
+                  type="submit" 
+                  size="sm"
+                  disabled={apiRequestCount >= API_REQUEST_LIMIT}
+                >
+                  <Search className="h-4 w-4" />
+                </Button>
+              </form>
+              
+              {apiRequestCount >= API_REQUEST_LIMIT && (
+                <div className="bg-yellow-50 dark:bg-yellow-900/20 text-yellow-800 dark:text-yellow-200 p-2 rounded-md text-xs">
+                  YouTube API kullanım sınırına ulaşıldı. Video önerileri sınırlı olabilir.
+                </div>
+              )}
+              
+              <div className="space-y-4">
+                <h3 className="text-sm font-medium">Video Önerileri</h3>
+                {loading ? (
+                  <div className="text-center py-8">
+                    <svg className="animate-spin h-8 w-8 text-primary mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p className="mt-2 text-sm text-muted-foreground">Video önerileri yükleniyor...</p>
+                  </div>
+                ) : recommendations.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {recommendations.slice(0, 6).map((song) => (
+                      <SongCard 
+                        key={song.id}
+                        song={song}
+                        onClick={() => playSong(song)}
+                        isCompact
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <Zap className="h-12 w-12 text-muted-foreground mx-auto mb-2" />
+                    <p className="text-muted-foreground">Youtube önerileri için arama yapın.</p>
+                  </div>
+                )}
+              </div>
+              
+              <div className="text-center mt-2">
+                <Button 
+                  variant="outline" 
+                  size="sm"
+                  disabled={apiRequestCount >= API_REQUEST_LIMIT}
+                  onClick={() => window.location.href = '/videos'}
+                >
+                  YouTube Videolarına Git
+                </Button>
+              </div>
+            </div>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+      
+      <CardFooter className="flex justify-between border-t pt-4">
+        <p className="text-xs text-muted-foreground">
+          Önerilen: {recommendations.length} şarkı
+        </p>
+        <a 
+          href="https://www.last.fm/" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="text-xs text-muted-foreground hover:text-primary transition-colors flex items-center gap-1"
+        >
+          <img src="https://www.last.fm/static/images/lastfm_logo_16.png" alt="Last.fm" className="h-3" />
+          Last.fm verilerini içerir
+        </a>
+      </CardFooter>
+    </Card>
+  );
+}
+// YARDIMCI FONKSİYONLAR
+// Ruh halini Last.fm türlerine eşleme
+function mapMoodToLastfmTag(mood: string): string {
+  const moodMap: Record<string, string> = {
+    'mutlu': 'happy',
+    'üzgün': 'sad',
+    'heyecanlı': 'energetic',
+    'sakin': 'calm',
+    'romantik': 'romantic',
+    'nostaljik': 'nostalgic',
+    'enerjik': 'energetic',
+    'hüzünlü': 'melancholy',
+    'dinlendirici': 'relaxing',
+    'konsantre': 'focus',
+    'motivasyonlu': 'motivational',
+    'neşeli': 'happy',
+    'depresif': 'sad',
+    'agresif': 'angry',
+    'karizmatik': 'cool'
+  };
+  
+  return moodMap[mood.toLowerCase()] || mood;
+}
+// Diziyi karıştır
+function shuffleArray<T>(array: T[]): T[] {
+  const newArray = [...array];
+  for (let i = newArray.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+  }
+  return newArray;
+}
+// İki metin arasındaki benzerliği ölç (Levenshtein mesafesi kullanarak)
+function similarity(s1: string, s2: string): number {
+  if (s1 === s2) return 1.0;
+  
+  const longer = s1.length > s2.length ? s1 : s2;
+  const shorter = s1.length > s2.length ? s2 : s1;
+  
+  if (longer.length === 0) return 1.0;
+  
+  return (longer.length - levenshteinDistance(longer, shorter)) / longer.length;
+}
+// Levenshtein mesafesi hesaplama
+function levenshteinDistance(s1: string, s2: string): number {
+  s1 = s1.toLowerCase();
+  s2 = s2.toLowerCase();
+  const costs = [];
+  for (let i = 0; i <= s1.length; i++) {
+    let lastValue = i;
+    for (let j = 0; j <= s2.length; j++) {
+      if (i === 0) {
+        costs[j] = j;
+      } else if (j > 0) {
+        let newValue = costs[j - 1];
+        if (s1.charAt(i - 1) !== s2.charAt(j - 1)) {
+          newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
+        }
+        costs[j - 1] = lastValue;
+        lastValue = newValue;
+      }
+    }
+    if (i > 0) costs[s2.length] = lastValue;
+  }
+  
+  return costs[s2.length];
+}
+client/src/lib/lastfm-api.ts
+
+/**
+ * Last.fm API entegrasyonu
+ * Bu modül, Last.fm API ile iletişim kurmak için gerekli fonksiyonları içerir.
+ */
+// Last.fm API anahtarı
+const LASTFM_API_KEY = import.meta.env.VITE_LASTFM_API_KEY || 'ed0f28ee6e2da02b1796c1bce3d85535';
+const LASTFM_API_URL = 'https://ws.audioscrobbler.com/2.0/';
+/**
+ * Şarkı bilgilerini alır
+ * @param artist Sanatçı adı
+ * @param track Şarkı adı
+ * @returns Şarkı bilgileri
+ */
+export async function getTrackInfo(artist: string, track: string): Promise<LastfmTrack | null> {
+  try {
+    const params = new URLSearchParams({
+      method: 'track.getInfo',
+      artist,
+      track,
+      api_key: LASTFM_API_KEY,
+      format: 'json',
+    });
+    const response = await fetch(`${LASTFM_API_URL}?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`Last.fm API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (!data.track) {
+      console.error('Last.fm şarkı bilgileri hatası:', data.message || 'Bilinmeyen hata');
+      return null;
+    }
+    return {
+      name: data.track.name,
+      artist: data.track.artist.name,
+      album: data.track.album?.title || '',
+      duration: parseInt(data.track.duration) || 0,
+      listeners: parseInt(data.track.listeners) || 0,
+      playcount: parseInt(data.track.playcount) || 0,
+      url: data.track.url,
+      imageUrl: data.track.album && data.track.album.image ? data.track.album.image.find((img: any) => img.size === 'large')?.['#text'] || '' : '',
+      tags: data.track.toptags?.tag?.map((tag: any) => tag.name) || [],
+      summary: data.track.wiki?.summary || '',
+    };
+  } catch (error) {
+    console.error('Last.fm şarkı bilgileri alınırken hata:', error);
+    return null;
+  }
+}
+/**
+ * Sanatçı bilgilerini alır
+ * @param artist Sanatçı adı
+ * @returns Sanatçı bilgileri
+ */
+export async function getArtistInfo(artist: string): Promise<LastfmArtist | null> {
+  try {
+    const params = new URLSearchParams({
+      method: 'artist.getInfo',
+      artist,
+      api_key: LASTFM_API_KEY,
+      format: 'json',
+    });
+    const response = await fetch(`${LASTFM_API_URL}?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`Last.fm API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (!data.artist) {
+      console.error('Last.fm sanatçı bilgileri hatası:', data.message || 'Bilinmeyen hata');
+      return null;
+    }
+    return {
+      name: data.artist.name,
+      listeners: parseInt(data.artist.stats.listeners) || 0,
+      playcount: parseInt(data.artist.stats.playcount) || 0,
+      url: data.artist.url,
+      imageUrl: data.artist.image ? data.artist.image.find((img: any) => img.size === 'large')?.['#text'] || '' : '',
+      similar: data.artist.similar?.artist?.map((a: any) => ({
+        name: a.name,
+        url: a.url,
+        imageUrl: a.image ? a.image.find((img: any) => img.size === 'large')?.['#text'] || '' : '',
+      })) || [],
+      tags: data.artist.tags?.tag?.map((tag: any) => tag.name) || [],
+      biography: data.artist.bio?.content || '',
+      summary: data.artist.bio?.summary || '',
+    };
+  } catch (error) {
+    console.error('Last.fm sanatçı bilgileri alınırken hata:', error);
+    return null;
+  }
+}
+/**
+ * Bir şarkıya benzer şarkıları alır
+ * @param artist Sanatçı adı
+ * @param track Şarkı adı
+ * @param limit Sonuç sayısı
+ * @returns Benzer şarkılar
+ */
+export async function getSimilarTracks(artist: string, track: string, limit: number = 10): Promise<LastfmTrack[]> {
+  try {
+    const params = new URLSearchParams({
+      method: 'track.getSimilar',
+      artist,
+      track,
+      limit: limit.toString(),
+      api_key: LASTFM_API_KEY,
+      format: 'json',
+    });
+    const response = await fetch(`${LASTFM_API_URL}?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`Last.fm API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (data.error || !data.similartracks?.track) {
+      console.error('Last.fm benzer şarkılar hatası:', data.message || 'Bilinmeyen hata');
+      return [];
+    }
+    const tracks = Array.isArray(data.similartracks.track) 
+      ? data.similartracks.track 
+      : [data.similartracks.track];
+    
+    return tracks.map((t: any) => ({
+      name: t.name,
+      artist: t.artist.name,
+      duration: 0, // API bu bilgiyi dönmüyor
+      listeners: parseInt(t.listeners) || 0,
+      playcount: parseInt(t.playcount) || 0,
+      url: t.url,
+      imageUrl: t.image?.find((img: any) => img.size === 'large')?['#text'] || '',
+      tags: [],
+      summary: '',
+    }));
+  } catch (error) {
+    console.error('Last.fm benzer şarkılar alınırken hata:', error);
+    return [];
+  }
+}
+/**
+ * Trend olan şarkıları alır
+ * @param limit Sonuç sayısı
+ * @returns Trend şarkılar
+ */
+export async function getTopTracks(limit: number = 10): Promise<LastfmTrack[]> {
+  try {
+    const params = new URLSearchParams({
+      method: 'chart.getTopTracks',
+      limit: limit.toString(),
+      api_key: LASTFM_API_KEY,
+      format: 'json',
+    });
+    const response = await fetch(`${LASTFM_API_URL}?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`Last.fm API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (data.error || !data.tracks?.track) {
+      console.error('Last.fm trend şarkılar hatası:', data.message || 'Bilinmeyen hata');
+      return [];
+    }
+    const tracks = Array.isArray(data.tracks.track) 
+      ? data.tracks.track 
+      : [data.tracks.track];
+    
+    return tracks.map((t: any) => ({
+      name: t.name,
+      artist: t.artist.name,
+      duration: 0, // API bu bilgiyi dönmüyor
+      listeners: parseInt(t.listeners) || 0,
+      playcount: parseInt(t.playcount) || 0,
+      url: t.url,
+      imageUrl: t.image?.find((img: any) => img.size === 'large')?['#text'] || '',
+      tags: [],
+      summary: '',
+    }));
+  } catch (error) {
+    console.error('Last.fm trend şarkılar alınırken hata:', error);
+    return [];
+  }
+}
+/**
+ * Bir türe göre en iyi şarkıları alır
+ * @param tag Tür adı
+ * @param limit Sonuç sayısı
+ * @returns Tür şarkıları
+ */
+export async function getTopTracksByTag(tag: string, limit: number = 10): Promise<LastfmTrack[]> {
+  try {
+    const params = new URLSearchParams({
+      method: 'tag.getTopTracks',
+      tag,
+      limit: limit.toString(),
+      api_key: LASTFM_API_KEY,
+      format: 'json',
+    });
+    const response = await fetch(`${LASTFM_API_URL}?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`Last.fm API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (data.error || !data.tracks?.track) {
+      console.error('Last.fm tür şarkıları hatası:', data.message || 'Bilinmeyen hata');
+      return [];
+    }
+    const tracks = Array.isArray(data.tracks.track) 
+      ? data.tracks.track 
+      : [data.tracks.track];
+    
+    return tracks.map((t: any) => ({
+      name: t.name,
+      artist: t.artist.name,
+      duration: 0, // API bu bilgiyi dönmüyor
+      listeners: parseInt(t.listeners) || 0,
+      playcount: parseInt(t.playcount) || 0,
+      url: t.url,
+      imageUrl: t.image?.find((img: any) => img.size === 'large')?['#text'] || '',
+      tags: [tag],
+      summary: '',
+    }));
+  } catch (error) {
+    console.error('Last.fm tür şarkıları alınırken hata:', error);
+    return [];
+  }
+}
+/**
+ * Türler
+ */
+export interface LastfmTrack {
+  name: string;
+  artist: string;
+  album?: string;
+  duration: number;
+  listeners: number;
+  playcount: number;
+  url: string;
+  imageUrl: string;
+  tags: string[];
+  summary: string;
+}
+export interface LastfmArtist {
+  name: string;
+  listeners: number;
+  playcount: number;
+  url: string;
+  imageUrl: string;
+  similar: {
+    name: string;
+    url: string;
+    imageUrl: string;
+  }[];
+  tags: string[];
+  biography: string;
+  summary: string;
+}
+client/src/lib/constants.ts
+
+// Available moods for music filtering
+export const MOODS = [
+  { id: 'mutlu', label: 'Mutlu' },
+  { id: 'enerjik', label: 'Enerjik' },
+  { id: 'romantik', label: 'Romantik' },
+  { id: 'hüzünlü', label: 'Hüzünlü' },
+  { id: 'dingin', label: 'Dingin' }
+];
+// Sample quick chat suggestions
+export const CHAT_SUGGESTIONS = [
+  'Bugün mutluyum',
+  'Rahatlatıcı müzik öner',
+  'Pop müzik öner',
+  'Tarkan şarkıları öner',
+  'Dua Lipa şarkıları',
+  'Romantik şarkılar'
+];
+// Default greeting message from the AI assistant
+export const DEFAULT_GREETING = 'Merhaba! Bugün nasılsınız? Size nasıl yardımcı olabilirim?';
+// Placeholder URL for missing cover images
+export const DEFAULT_COVER_URL = 'https://via.placeholder.com/300x300?text=No+Cover';
+// User ID for the current user (in a real app, would come from auth)
+export const CURRENT_USER_ID = 1;
+client/src/lib/youtube-api.ts
+
+const API_KEY = import.meta.env.VITE_YOUTUBE_API_KEY || 'AIzaSyDr3xUiR_xMx2B2VsS5sdQmUTeSWtAqXXo';
+const API_URL = 'https://www.googleapis.com/youtube/v3';
+export interface YoutubeSearchResult {
+  id: string;
+  title: string;
+  description: string;
+  channelTitle: string;
+  publishedAt: string;
+  thumbnailUrl: string;
+  viewCount?: string;
+  likeCount?: string;
+}
+/**
+ * YouTube'da arama yapar
+ * @param query Arama sorgusu
+ * @param maxResults Maksimum sonuç sayısı
+ * @returns Arama sonuçları
+ */
+export async function searchYouTube(query: string, maxResults: number = 10): Promise<YoutubeSearchResult[]> {
+  try {
+    const params = new URLSearchParams({
+      part: 'snippet',
+      q: query,
+      type: 'video',
+      maxResults: maxResults.toString(),
+      key: API_KEY,
+    });
+    const response = await fetch(`${API_URL}/search?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`YouTube API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (!data.items || data.items.length === 0) {
+      console.info('YouTube sonuçları bulunamadı.');
+      return [];
+    }
+    
+    return data.items.map((item: any) => ({
+      id: item.id.videoId,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      channelTitle: item.snippet.channelTitle,
+      publishedAt: item.snippet.publishedAt,
+      thumbnailUrl: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default?.url,
+    }));
+  } catch (error) {
+    console.error('YouTube arama hatası:', error);
+    return [];
+  }
+}
+/**
+ * YouTube video detaylarını alır
+ * @param videoId Video ID
+ * @returns Video detayları
+ */
+export async function getVideoDetails(videoId: string): Promise<YoutubeSearchResult | null> {
+  try {
+    const params = new URLSearchParams({
+      part: 'snippet,statistics',
+      id: videoId,
+      key: API_KEY,
+    });
+    const response = await fetch(`${API_URL}/videos?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`YouTube API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (!data.items || data.items.length === 0) {
+      console.error('YouTube video detayları bulunamadı.');
+      return null;
+    }
+    
+    const video = data.items[0];
+    
+    return {
+      id: video.id,
+      title: video.snippet.title,
+      description: video.snippet.description,
+      channelTitle: video.snippet.channelTitle,
+      publishedAt: video.snippet.publishedAt,
+      thumbnailUrl: video.snippet.thumbnails.high?.url || video.snippet.thumbnails.default?.url,
+      viewCount: video.statistics?.viewCount,
+      likeCount: video.statistics?.likeCount,
+    };
+  } catch (error) {
+    console.error('YouTube video detayları hatası:', error);
+    return null;
+  }
+}
+/**
+ * İlgili videoları getirir
+ * @param videoId Video ID
+ * @param maxResults Maksimum sonuç sayısı
+ * @returns Benzer videolar
+ */
+export async function getRelatedVideos(videoId: string, maxResults: number = 10): Promise<YoutubeSearchResult[]> {
+  try {
+    const params = new URLSearchParams({
+      part: 'snippet',
+      relatedToVideoId: videoId,
+      type: 'video',
+      maxResults: maxResults.toString(),
+      key: API_KEY,
+    });
+    const response = await fetch(`${API_URL}/search?${params.toString()}`);
+    
+    if (!response.ok) {
+      throw new Error(`YouTube API hatası: ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (!data.items || data.items.length === 0) {
+      console.info('İlgili videolar bulunamadı.');
+      return [];
+    }
+    
+    return data.items.map((item: any) => ({
+      id: item.id.videoId,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      channelTitle: item.snippet.channelTitle,
+      publishedAt: item.snippet.publishedAt,
+      thumbnailUrl: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default?.url,
+    }));
+  } catch (error) {
+    console.error('İlgili videoları getirme hatası:', error);
+    return [];
+  }
+}
+/**
+ * YouTube video embed URL'sini oluşturur
+ * @param videoId Video ID
+ * @param autoplay Otomatik başlatma
+ * @returns Embed URL
+ */
+export function getYouTubeEmbedUrl(videoId: string, autoplay: boolean = false): string {
+  let url = `https://www.youtube.com/embed/${videoId}`;
+  
+  const params = new URLSearchParams();
+  
+  if (autoplay) {
+    params.append('autoplay', '1');
+  }
+  
+  params.append('rel', '0');
+  params.append('modestbranding', '1');
+  
+  return `${url}?${params.toString()}`;
+}
+client/src/components/YouTubePlayer.tsx
+
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
+import { Button } from '@/components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Skeleton } from '@/components/ui/skeleton';
+import { searchYouTube, getRelatedVideos, getYouTubeEmbedUrl, YoutubeSearchResult } from '@/lib/youtube-api';
+import { useToast } from '@/hooks/use-toast';
+import { Search, Video, TrendingUp, History } from 'lucide-react';
+interface YouTubePlayerProps {
+  searchQuery?: string;
+  videoId?: string;
+  autoplay?: boolean;
+  showRelated?: boolean;
+  onVideoSelected?: (video: YoutubeSearchResult) => void;
+  className?: string;
+}
+export function YouTubePlayer({
+  searchQuery,
+  videoId,
+  autoplay = false,
+  showRelated = true,
+  onVideoSelected,
+  className = '',
+}: YouTubePlayerProps) {
+  const [query, setQuery] = useState(searchQuery || '');
+  const [searching, setSearching] = useState(false);
+  const [currentVideoId, setCurrentVideoId] = useState(videoId || '');
+  const [searchResults, setSearchResults] = useState<YoutubeSearchResult[]>([]);
+  const [relatedVideos, setRelatedVideos] = useState<YoutubeSearchResult[]>([]);
+  const [recentlyWatched, setRecentlyWatched] = useState<YoutubeSearchResult[]>([]);
+  const [activeTab, setActiveTab] = useState('player');
+  const { toast } = useToast();
+  // Yeni bir video seçildiğinde 
+  const handleVideoSelect = (video: YoutubeSearchResult) => {
+    // Mevcut video ile aynı ise işlem yapma
+    if (currentVideoId === video.id) return;
+    
+    setCurrentVideoId(video.id);
+    
+    // Son izlenen videolara ekle
+    const isInRecentlyWatched = recentlyWatched.some(v => v.id === video.id);
+    if (!isInRecentlyWatched) {
+      // Listeyi güncelle (en fazla 10 video)
+      const updatedRecent = [video, ...recentlyWatched].slice(0, 10);
+      setRecentlyWatched(updatedRecent);
+      // localStorage'a kaydet
+      localStorage.setItem('youtube_recently_watched', JSON.stringify(updatedRecent));
+    }
+    
+    // İlgili videoları getir
+    if (showRelated) {
+      fetchRelatedVideos(video.id);
+    }
+    
+    // Callback
+    if (onVideoSelected) {
+      onVideoSelected(video);
+    }
+  };
+  // YouTube'da arama yapma
+  const handleSearch = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    
+    if (!query.trim()) {
+      toast({
+        title: "Arama hatası",
+        description: "Lütfen bir arama terimi girin",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    setSearching(true);
+    
+    try {
+      const results = await searchYouTube(query, 10);
+      setSearchResults(results);
+      
+      // Sonuç yoksa veya boşsa hata göster
+      if (results.length === 0) {
+        toast({
+          title: "Sonuç bulunamadı",
+          description: `"${query}" için sonuç bulunamadı`,
+          variant: "default",
+        });
+      } else if (!currentVideoId) {
+        // İlk video varsa ve henüz bir video seçilmemişse onu seç
+        handleVideoSelect(results[0]);
+      }
+      
+      // Video arama sekmesine geç
+      setActiveTab('search');
+    } catch (error) {
+      console.error("YouTube arama hatası:", error);
+      toast({
+        title: "YouTube API Hatası",
+        description: "Video aranırken bir hata oluştu. Lütfen daha sonra tekrar deneyin.",
+        variant: "destructive",
+      });
+    } finally {
+      setSearching(false);
+    }
+  };
+  // İlgili videoları getir
+  const fetchRelatedVideos = async (vidId: string) => {
+    try {
+      const results = await getRelatedVideos(vidId, 10);
+      setRelatedVideos(results);
+    } catch (error) {
+      console.error("İlgili video getirme hatası:", error);
+    }
+  };
+  // İlk yüklemede
+  useEffect(() => {
+    // Son izlenen videoları localStorage'dan al
+    const savedRecent = localStorage.getItem('youtube_recently_watched');
+    if (savedRecent) {
+      try {
+        const parsedRecent = JSON.parse(savedRecent);
+        setRecentlyWatched(parsedRecent);
+      } catch (error) {
+        console.error("Son izlenenler parse hatası:", error);
+      }
+    }
+    
+    // Başlangıç videosu varsa ilgili videoları getir
+    if (videoId) {
+      setCurrentVideoId(videoId);
+      fetchRelatedVideos(videoId);
+    }
+    // Başlangıç araması varsa
+    else if (searchQuery) {
+      setQuery(searchQuery);
+      handleSearch();
+    }
+  }, []);
+  // Video karesi
+  const renderVideoCard = (video: YoutubeSearchResult, isActive: boolean = false) => (
+    <div 
+      key={video.id}
+      className={`flex gap-2 p-2 rounded-md hover:bg-accent cursor-pointer transition-colors ${isActive ? 'bg-primary/10' : ''}`}
+      onClick={() => handleVideoSelect(video)}
+    >
+      <div className="flex-shrink-0 relative w-24 h-16 overflow-hidden rounded">
+        <img 
+          src={video.thumbnailUrl} 
+          alt={video.title} 
+          className="object-cover w-full h-full"
+        />
+      </div>
+      <div className="flex-1 min-w-0">
+        <h4 className="text-sm font-medium truncate">{video.title}</h4>
+        <p className="text-xs text-muted-foreground truncate">{video.channelTitle}</p>
+      </div>
+    </div>
+  );
+  return (
+    <Card className={`overflow-hidden ${className}`}>
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center gap-2 text-xl">
+          <Video className="h-5 w-5 text-red-500" />
+          YouTube Player
+        </CardTitle>
+        <CardDescription>
+          Müzik videolarını keşfedin ve izleyin
+        </CardDescription>
+        
+        {/* Arama formu */}
+        <form onSubmit={handleSearch} className="flex gap-2 mt-2">
+          <Input
+            type="text"
+            placeholder="YouTube'da ara..."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            className="flex-1"
+          />
+          <Button type="submit" disabled={searching}>
+            <Search className="h-4 w-4" />
+          </Button>
+        </form>
+      </CardHeader>
+      
+      <CardContent className="p-0">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+          <TabsList className="w-full rounded-none px-6">
+            <TabsTrigger value="player" className="flex-1 gap-1">
+              <Video className="h-4 w-4" /> Video
+            </TabsTrigger>
+            <TabsTrigger value="search" className="flex-1 gap-1">
+              <Search className="h-4 w-4" /> Ara
+            </TabsTrigger>
+            <TabsTrigger value="related" className="flex-1 gap-1">
+              <TrendingUp className="h-4 w-4" /> İlgili
+            </TabsTrigger>
+            <TabsTrigger value="history" className="flex-1 gap-1">
+              <History className="h-4 w-4" /> Geçmiş
+            </TabsTrigger>
+          </TabsList>
+          
+          {/* Video oynatıcı */}
+          <TabsContent value="player" className="m-0">
+            <div className="relative w-full pt-[56.25%]">
+              {currentVideoId ? (
+                <iframe
+                  className="absolute top-0 left-0 w-full h-full"
+                  src={getYouTubeEmbedUrl(currentVideoId, autoplay)}
+                  title="YouTube video player"
+                  frameBorder="0"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                  allowFullScreen
+                ></iframe>
+              ) : (
+                <div className="absolute top-0 left-0 w-full h-full flex items-center justify-center bg-muted">
+                  <div className="text-center p-4">
+                    <Video className="h-12 w-12 mx-auto mb-2 text-muted-foreground" />
+                    <p className="text-muted-foreground">İzlemek için bir video seçin</p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+          
+          {/* Arama sonuçları */}
+          <TabsContent value="search" className="m-0">
+            <ScrollArea className="h-80">
+              <div className="p-4 space-y-2">
+                <h3 className="text-sm font-medium mb-2">Arama Sonuçları</h3>
+                {searching ? (
+                  // Yükleniyor durumu
+                  Array.from({ length: 5 }).map((_, index) => (
+                    <div key={index} className="flex gap-2 p-2">
+                      <Skeleton className="h-16 w-24 rounded" />
+                      <div className="space-y-2 flex-1">
+                        <Skeleton className="h-4 w-full" />
+                        <Skeleton className="h-3 w-3/4" />
+                      </div>
+                    </div>
+                  ))
+                ) : searchResults.length > 0 ? (
+                  // Arama sonuçları
+                  searchResults.map(video => renderVideoCard(video, video.id === currentVideoId))
+                ) : (
+                  // Sonuç yok
+                  <div className="text-center p-6">
+                    <Search className="h-12 w-12 mx-auto mb-2 text-muted-foreground" />
+                    <p className="text-muted-foreground">Video aramak için yukarıdaki arama kutusunu kullanın</p>
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+          
+          {/* İlgili videolar */}
+          <TabsContent value="related" className="m-0">
+            <ScrollArea className="h-80">
+              <div className="p-4 space-y-2">
+                <h3 className="text-sm font-medium mb-2">İlgili Videolar</h3>
+                {currentVideoId ? (
+                  relatedVideos.length > 0 ? (
+                    // İlgili videolar
+                    relatedVideos.map(video => renderVideoCard(video, video.id === currentVideoId))
+                  ) : (
+                    // Yükleniyor
+                    <div className="text-center p-6">
+                      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-2"></div>
+                      <p className="text-muted-foreground">İlgili videolar yükleniyor...</p>
+                    </div>
+                  )
+                ) : (
+                  // Video seçilmedi
+                  <div className="text-center p-6">
+                    <TrendingUp className="h-12 w-12 mx-auto mb-2 text-muted-foreground" />
+                    <p className="text-muted-foreground">İlgili videoları görmek için önce bir video seçin</p>
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+          
+          {/* İzleme geçmişi */}
+          <TabsContent value="history" className="m-0">
+            <ScrollArea className="h-80">
+              <div className="p-4 space-y-2">
+                <h3 className="text-sm font-medium mb-2">Son İzlenenler</h3>
+                {recentlyWatched.length > 0 ? (
+                  // Son izlenenler
+                  recentlyWatched.map(video => renderVideoCard(video, video.id === currentVideoId))
+                ) : (
+                  // İzleme geçmişi yok
+                  <div className="text-center p-6">
+                    <History className="h-12 w-12 mx-auto mb-2 text-muted-foreground" />
+                    <p className="text-muted-foreground">Henüz izlenen video yok</p>
+                  </div>
+                )}
+              </div>
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
+      </CardContent>
+      
+      <CardFooter className="flex justify-between pt-4 border-t">
+        <div className="text-xs text-muted-foreground">
+          {currentVideoId && (
+            <a 
+              href={`https://youtube.com/watch?v=${currentVideoId}`} 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="hover:underline"
+            >
+              YouTube'da izle
+            </a>
+          )}
+        </div>
+        
+        <a 
+          href="https://youtube.com" 
+          target="_blank" 
+          rel="noopener noreferrer"
+          className="text-xs text-muted-foreground hover:text-red-500 transition-colors flex items-center gap-1"
+        >
+          <Video className="h-3 w-3" />
+          YouTube
+        </a>
+      </CardFooter>
+    </Card>
+  );
+}
+client/src/pages/ArtistPage.tsx
+
+import React, { useState, useEffect } from 'react';
+import { useLocation, useSearch } from 'wouter';
+import Layout from '@/components/Layout';
+import { ArtistDetails } from '@/components/ArtistDetails';
+import { SongTable } from '@/components/SongTable';
+import { YouTubePlayer } from '@/components/YouTubePlayer';
+import { RecommendationEngine } from '@/components/RecommendationEngine';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Music, Search, User } from 'lucide-react';
+import { fetchSongsByArtist } from '@/lib/xata';
+import { getArtistInfo } from '@/lib/lastfm-api';
+import { searchYouTube } from '@/lib/youtube-api';
+import type { Song } from '@shared/schema';
+export default function ArtistPage() {
+  const [_, navigate] = useLocation();
+  const searchParams = useSearch();
+  const params = new URLSearchParams(searchParams);
+  const artistName = params.get('name') || '';
+  
+  const [searchQuery, setSearchQuery] = useState(artistName);
+  const [artist, setArtist] = useState('');
+  const [artistInfo, setArtistInfo] = useState<any>(null);
+  const [songs, setSongs] = useState<Song[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  
+  // Page title
+  document.title = artist ? `${artist} - Müzik Asistanım` : 'Sanatçı Keşfi - Müzik Asistanım';
+  
+  // Sanatçı verilerini yükle
+  const loadArtistData = async (name: string) => {
+    if (!name) return;
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      // Sanatçı adını URL'e ekle (sayfa yenilendiğinde hatırlansın)
+      navigate(`/artist?name=${encodeURIComponent(name)}`, { replace: true });
+      
+      // Sanatçı adını state'e kaydet
+      setArtist(name);
+      
+      // Last.fm API'den sanatçı bilgisi al
+      const artistData = await getArtistInfo(name);
+      setArtistInfo(artistData);
+      
+      // Xata veritabanından sanatçı şarkıları al
+      const artistSongs = await fetchSongsByArtist(name);
+      setSongs(artistSongs);
+      
+    } catch (err) {
+      console.error('Sanatçı bilgileri yüklenirken hata:', err);
+      setError('Sanatçı bilgileri yüklenirken bir hata oluştu. Lütfen daha sonra tekrar deneyin.');
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // İlk yükleme
+  useEffect(() => {
+    if (artistName) {
+      setSearchQuery(artistName);
+      loadArtistData(artistName);
+    }
+  }, [artistName]);
+  
+  // Sanatçı araması
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (searchQuery.trim()) {
+      loadArtistData(searchQuery.trim());
+    }
+  };
+  
+  return (
+    <Layout>
+      <div className="container px-4 mx-auto">
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <h1 className="text-3xl font-bold flex items-center gap-2">
+            <User className="h-8 w-8 text-primary" />
+            Sanatçı Keşfi
+          </h1>
+          
+          <form onSubmit={handleSearch} className="flex w-full sm:w-auto gap-2">
+            <Input
+              type="text"
+              placeholder="Sanatçı adı..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full sm:w-64"
+            />
+            <Button type="submit" disabled={loading}>
+              <Search className="h-4 w-4" />
+            </Button>
+          </form>
+        </div>
+        
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-8">
+          <div className="lg:col-span-8 space-y-8">
+            {/* Sanatçı detayları */}
+            {loading ? (
+              <Card>
+                <CardHeader className="pb-4">
+                  <Skeleton className="h-8 w-64 mb-2" />
+                  <Skeleton className="h-4 w-full" />
+                </CardHeader>
+                <CardContent>
+                  <div className="flex gap-4 mb-4">
+                    <Skeleton className="h-40 w-40 rounded-md" />
+                    <div className="space-y-2 flex-1">
+                      <Skeleton className="h-5 w-3/4" />
+                      <Skeleton className="h-5 w-1/2" />
+                      <Skeleton className="h-4 w-full" />
+                      <Skeleton className="h-4 w-full" />
+                      <Skeleton className="h-4 w-3/4" />
+                    </div>
+                  </div>
+                  <Skeleton className="h-24 w-full" />
+                </CardContent>
+              </Card>
+            ) : error ? (
+              <Card className="bg-destructive/10 border-destructive/50">
+                <CardHeader>
+                  <CardTitle>Hata</CardTitle>
+                  <CardDescription>{error}</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <p>Lütfen sanatçı adını kontrol edin ve tekrar deneyin.</p>
+                  <Button onClick={() => navigate('/')} className="mt-4">
+                    Ana Sayfaya Dön
+                  </Button>
+                </CardContent>
+              </Card>
+            ) : artist ? (
+              <ArtistDetails artistName={artist} />
+            ) : (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Sanatçı Keşfi</CardTitle>
+                  <CardDescription>
+                    Keşfetmek istediğiniz sanatçıyı arayın.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="text-center py-12">
+                  <User className="h-16 w-16 mx-auto mb-4 text-muted-foreground" />
+                  <p className="text-muted-foreground">
+                    Sanatçı bilgilerini görüntülemek için yukarıdaki arama kutusunu kullanın.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+            
+            {/* Sanatçı şarkıları */}
+            {!loading && !error && artist && (
+              <SongTable 
+                songs={songs}
+                title={`${artist} Şarkıları`}
+                showViewAll={false}
+              />
+            )}
+            
+            {/* YouTube Player */}
+            {!loading && !error && artist && (
+              <YouTubePlayer searchQuery={`${artist} music official`} />
+            )}
+          </div>
+          
+          <div className="lg:col-span-4 space-y-6">
+            {/* Sanatçı önerileri */}
+            {!loading && !error && artistInfo?.similar && artistInfo.similar.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-xl flex items-center gap-2">
+                    <User className="h-5 w-5 text-primary" />
+                    Benzer Sanatçılar
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {artistInfo.similar.slice(0, 5).map((similar: any, index: number) => (
+                      <div 
+                        key={index}
+                        className="flex items-center gap-3 p-2 rounded-md hover:bg-accent cursor-pointer transition-colors"
+                        onClick={() => loadArtistData(similar.name)}
+                      >
+                        <div className="flex-shrink-0 h-10 w-10 rounded-full overflow-hidden bg-muted">
+                          {similar.imageUrl ? (
+                            <img 
+                              src={similar.imageUrl} 
+                              alt={similar.name}
+                              className="h-full w-full object-cover"
+                            />
+                          ) : (
+                            <User className="h-full w-full p-2 text-muted-foreground" />
+                          )}
+                        </div>
+                        <div>
+                          <p className="font-medium text-sm">{similar.name}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+            
+            {/* Popüler türler */}
+            {!loading && !error && artistInfo?.tags && artistInfo.tags.length > 0 && (
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-xl flex items-center gap-2">
+                    <Music className="h-5 w-5 text-primary" />
+                    Müzik Türleri
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex flex-wrap gap-2">
+                    {artistInfo.tags.map((tag: string, index: number) => (
+                      <Button 
+                        key={index}
+                        variant="outline"
+                        size="sm"
+                        onClick={() => navigate(`/search?q=${encodeURIComponent(tag)}`)}
+                        className="capitalize"
+                      >
+                        {tag}
+                      </Button>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+            
+            {/* Öneri motoru */}
+            {!loading && !error && artist && (
+              <RecommendationEngine
+                initialMood={songs[0]?.mood?.[0] || ''}
+                recentlyPlayedSongs={songs.slice(0, 5)}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+    </Layout>
+  );
+}
+client/src/components/ArtistDetails.tsx
+
+import React, { useState, useEffect } from 'react';
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Badge } from '@/components/ui/badge';
+import { getArtistInfo } from '@/lib/lastfm-api';
+import { TrendingUp, Music, User, ExternalLink } from 'lucide-react';
+interface ArtistDetailsProps {
+  artistName: string;
+  className?: string;
+}
+export function ArtistDetails({ artistName, className }: ArtistDetailsProps) {
+  const [artistInfo, setArtistInfo] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showFullBio, setShowFullBio] = useState(false);
+  
+  useEffect(() => {
+    if (!artistName) return;
+    
+    const loadArtistInfo = async () => {
+      setLoading(true);
+      setError(null);
+      
+      try {
+        const info = await getArtistInfo(artistName);
+        setArtistInfo(info);
+      } catch (err) {
+        console.error("Sanatçı bilgisi yüklenirken hata:", err);
+        setError("Sanatçı bilgileri yüklenirken bir hata oluştu.");
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    loadArtistInfo();
+  }, [artistName]);
+  
+  const formatNumber = (num: number): string => {
+    return new Intl.NumberFormat('tr-TR').format(num);
+  };
+  
+  if (loading) {
+    return (
+      <Card className={className}>
+        <CardHeader>
+          <Skeleton className="h-8 w-64 mb-2" />
+          <Skeleton className="h-4 w-full" />
+        </CardHeader>
+        <CardContent>
+          <div className="flex gap-4 mb-4">
+            <Skeleton className="h-40 w-40 rounded-md" />
+            <div className="space-y-2 flex-1">
+              <Skeleton className="h-5 w-3/4" />
+              <Skeleton className="h-5 w-1/2" />
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-3/4" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+  
+  if (error || !artistInfo) {
+    return (
+      <Card className={`${className} bg-destructive/10 border-destructive/50`}>
+        <CardHeader>
+          <CardTitle>Hata</CardTitle>
+          <CardDescription>Sanatçı bilgileri yüklenemedi.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {error || "Bilinmeyen bir hata oluştu. Lütfen daha sonra tekrar deneyin."}
+        </CardContent>
+      </Card>
+    );
+  }
+  
+  // HTML işaretlerini kaldır
+  const cleanHtml = (html: string): string => {
+    return html.replace(/<[^>]*>/g, '');
+  };
+  
+  // İçerik kısaltma
+  const truncateText = (text: string, maxLength: number): string => {
+    if (text.length <= maxLength) return text;
+    return text.substr(0, maxLength) + '...';
+  };
+  
+  const cleanedBio = artistInfo.biography ? cleanHtml(artistInfo.biography) : '';
+  const cleanedSummary = artistInfo.summary ? cleanHtml(artistInfo.summary) : '';
+  
+  return (
+    <Card className={className}>
+      <CardHeader>
+        <CardTitle className="text-2xl flex items-center gap-2">
+          <User className="h-6 w-6 text-primary" />
+          {artistInfo.name}
+        </CardTitle>
+        <CardDescription>
+          {artistInfo.tags && artistInfo.tags.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1">
+              {artistInfo.tags.slice(0, 5).map((tag: string, index: number) => (
+                <Badge key={index} variant="outline" className="capitalize">{tag}</Badge>
+              ))}
+            </div>
+          )}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex flex-col md:flex-row gap-4">
+          {/* Sanatçı Resmi */}
+          <div className="flex-shrink-0">
+            {artistInfo.imageUrl ? (
+              <img 
+                src={artistInfo.imageUrl} 
+                alt={artistInfo.name}
+                className="w-40 h-40 object-cover rounded-md bg-muted"
+              />
+            ) : (
+              <div className="w-40 h-40 bg-muted rounded-md flex items-center justify-center">
+                <User className="h-16 w-16 text-muted-foreground" />
+              </div>
+            )}
+          </div>
+          
+          {/* Sanatçı İstatistikleri */}
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <h3 className="text-sm font-medium flex items-center gap-1">
+                  <TrendingUp className="h-4 w-4 text-primary" />
+                  Dinlenmeler
+                </h3>
+                <p className="text-xl font-bold">
+                  {formatNumber(artistInfo.playcount || 0)}
+                </p>
+              </div>
+              <div>
+                <h3 className="text-sm font-medium flex items-center gap-1">
+                  <User className="h-4 w-4 text-primary" />
+                  Dinleyiciler
+                </h3>
+                <p className="text-xl font-bold">
+                  {formatNumber(artistInfo.listeners || 0)}
+                </p>
+              </div>
+            </div>
+            
+            {/* Kısa Biyografi */}
+            {cleanedSummary && (
+              <div>
+                <h3 className="text-sm font-medium mb-1">Hakkında</h3>
+                <p className="text-sm text-muted-foreground">
+                  {cleanedSummary}
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+        
+        {/* Tam Biyografi */}
+        {cleanedBio && (
+          <div className="mt-4">
+            <h3 className="text-sm font-medium mb-2">Biyografi</h3>
+            <div className="text-sm text-muted-foreground">
+              {showFullBio ? cleanedBio : truncateText(cleanedBio, 500)}
+              
+              {cleanedBio.length > 500 && (
+                <Button 
+                  variant="link" 
+                  size="sm" 
+                  onClick={() => setShowFullBio(!showFullBio)}
+                  className="px-0 h-auto font-medium"
+                >
+                  {showFullBio ? 'Daha az göster' : 'Devamını oku'}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+      </CardContent>
+      <CardFooter className="flex justify-between border-t pt-4">
+        <div className="text-xs text-muted-foreground">
+          Bilgi kaynağı: Last.fm
+        </div>
+        
+        {artistInfo.url && (
+          <a 
+            href={artistInfo.url} 
+            target="_blank" 
+            rel="noopener noreferrer"
+            className="text-xs flex items-center gap-1 text-primary hover:underline"
+          >
+            Last.fm'de görüntüle <ExternalLink className="h-3 w-3" />
+          </a>
+        )}
+      </CardFooter>
+    </Card>
+  );
+}

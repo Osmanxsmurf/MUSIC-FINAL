@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+  <title>Çevrimdışı - MüzikAI</title>
+  <style>
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      padding: 1rem;
+      background-color: #0f172a;
+      color: #f8fafc;
+      text-align: center;
+    }
+    
+    .container {
+      max-width: 500px;
+      padding: 2rem;
+      background-color: #1e293b;
+      border-radius: 0.75rem;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    }
+    
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 1rem;
+      color: #f8fafc;
+    }
+    
+    p {
+      margin-bottom: 1.5rem;
+      color: #cbd5e1;
+      line-height: 1.5;
+    }
+    
+    .icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      color: #6366f1;
+    }
+    
+    .button {
+      display: inline-block;
+      background-color: #6366f1;
+      color: white;
+      padding: 0.75rem 1.5rem;
+      border-radius: 0.5rem;
+      font-weight: 500;
+      text-decoration: none;
+      transition: background-color 0.2s;
+      border: none;
+      cursor: pointer;
+    }
+    
+    .button:hover {
+      background-color: #4f46e5;
+    }
+    
+    .offline-indicator {
+      display: flex;
+      align-items: center;
+      padding: 0.5rem 1rem;
+      background-color: #374151;
+      border-radius: 2rem;
+      margin-bottom: 1.5rem;
+    }
+    
+    .offline-dot {
+      width: 0.5rem;
+      height: 0.5rem;
+      background-color: #ef4444;
+      border-radius: 50%;
+      margin-right: 0.5rem;
+    }
+    
+    @media (prefers-color-scheme: light) {
+      body {
+        background-color: #f1f5f9;
+        color: #1e293b;
+      }
+      
+      .container {
+        background-color: white;
+      }
+      
+      h1 {
+        color: #1e293b;
+      }
+      
+      p {
+        color: #334155;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="offline-indicator">
+      <div class="offline-dot"></div>
+      <span>Çevrimdışı</span>
+    </div>
+    
+    <div class="icon">🎵</div>
+    
+    <h1>İnternet Bağlantısı Yok</h1>
+    
+    <p>
+      Görünüşe göre internet bağlantınız kesildi. Çevrimdışı modda daha önce önbelleğe alınmış içeriklere erişebilirsiniz.
+    </p>
+    
+    <p>
+      MüzikAI'nin tadını çıkarmak için lütfen internet bağlantınızı kontrol edin ve tekrar deneyin.
+    </p>
+    
+    <button class="button" onclick="window.location.reload()">
+      Yenile
+    </button>
+  </div>
+  
+  <script>
+    // Check if online and reload if connection is restored
+    window.addEventListener('online', () => {
+      window.location.reload();
+    });
+  </script>
+</body>
+</html>

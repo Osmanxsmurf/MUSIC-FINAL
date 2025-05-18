@@ -1,0 +1,43 @@
+{
+  "name": "MüzikAI - Kişiselleştirilmiş Müzik Asistanı",
+  "short_name": "MüzikAI",
+  "description": "Yapay zeka destekli müzik önerileri ve kişiselleştirilmiş deneyim",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1e293b",
+  "theme_color": "#3b82f6",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Keşfet",
+      "short_name": "Keşfet",
+      "description": "Yeni müzikler keşfedin",
+      "url": "/",
+      "icons": [{"src": "/icon-192x192.png", "sizes": "192x192"}]
+    },
+    {
+      "name": "AI Asistan",
+      "short_name": "Asistan",
+      "description": "AI müzik asistanına sorun",
+      "url": "/assistant",
+      "icons": [{"src": "/icon-192x192.png", "sizes": "192x192"}]
+    }
+  ],
+  "related_applications": [],
+  "prefer_related_applications": false,
+  "screenshots": []
+}

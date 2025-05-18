@@ -1,0 +1,1168 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Sparkles, Send, Loader2, MessageSquare, User, Bot, Brain, ThumbsUp, ThumbsDown, HelpCircle, Lightbulb } from 'lucide-react';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+import { CHAT_SUGGESTIONS, DEFAULT_GREETING } from '@/lib/constants';
+import { BrainState, analyzeMessage, generateResponse } from '@/lib/super-ai';
+import { fetchChatHistory, sendChatMessage, AiMessage } from '@/lib/xata';
+import { SongCard } from './SongCard';
+import { MusicPlayerContext } from './Layout';
+import { useToast } from '@/hooks/use-toast';
+import type { Song } from '@shared/schema';
+
+interface SuperAIAssistantProps {
+  className?: string;
+}
+
+export const SuperAIAssistant: React.FC<SuperAIAssistantProps> = ({ className }) => {
+  const { playSong } = React.useContext(MusicPlayerContext);
+  const { toast } = useToast();
+  const [messages, setMessages] = useState<AiMessage[]>([]);
+  const [inputMessage, setInputMessage] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>(CHAT_SUGGESTIONS);
+  const [brainState, setBrainState] = useState<BrainState | null>(null);
+  const [recommendations, setRecommendations] = useState<Song[]>([]);
+  const [showBrainState, setShowBrainState] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  // Sohbet geçmişini yükle
+  useEffect(() => {
+    const loadHistory = async () => {
+      try {
+        const history = await fetchChatHistory();
+        
+        if (history.length === 0) {
+          // İlk mesaj olarak bir selamlama ekle
+          setMessages([{
+            id: 0,
+            userId: 1,
+            role: 'assistant',
+            content: DEFAULT_GREETING + "\n\nHoş geldiniz! Size kişiselleştirilmiş müzik önerileri sunabilirim. Ruh halinizi, sevdiğiniz sanatçıları veya müzik tarzlarınızı paylaşarak başlayabilirsiniz.",
+            timestamp: new Date()
+          }]);
+        } else {
+          setMessages(history);
+        }
+      } catch (error) {
+        console.error('Sohbet geçmişi yüklenirken hata:', error);
+        toast({
+          title: 'Bağlantı Hatası',
+          description: 'Sohbet geçmişi yüklenemedi. Lütfen daha sonra tekrar deneyin.',
+          variant: 'destructive'
+        });
+      }
+    };
+    
+    loadHistory();
+  }, [toast]);
+  
+  // Mesajlar güncellendiğinde en aşağı kaydır
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
+  
+  // Mesaj gönderme işlevi
+  const sendMessage = async () => {
+    if (!inputMessage.trim()) return;
+    
+    try {
+      // Kullanıcı mesajını ekle
+      const userMessage: AiMessage = {
+        id: Date.now(), 
+        userId: 1,
+        role: 'user',
+        content: inputMessage,
+        timestamp: new Date()
+      };
+      
+      setMessages(prev => [...prev, userMessage]);
+      setInputMessage('');
+      setIsTyping(true);
+      setIsThinking(true);
+      
+      // "Düşünme" sürecini simüle et
+      // 1-2 saniye arasında rastgele bir süre bekle
+      await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
+      
+      // Beyin durumunu güncelle ve göster
+      const newBrainState = analyzeMessage(userMessage.content, messages);
+      setBrainState(newBrainState);
+      setShowBrainState(true);
+      
+      // Biraz daha bekle
+      await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 1000));
+      
+      // Mesajı sunucuya gönder ve yanıt al
+      const response = await sendChatMessage(inputMessage);
+      
+      // Yanıtı göster
+      setMessages(prev => [...prev, response.message]);
+      
+      // Eğer öneriler varsa göster
+      if (response.recommendations && response.recommendations.length > 0) {
+        setRecommendations(response.recommendations);
+      }
+      
+      // Beyin durumunu kapat
+      setShowBrainState(false);
+      setIsThinking(false);
+      setIsTyping(false);
+      
+      // Takip soruları için yeni kişiselleştirilmiş öneriler oluştur
+      // (şu an için sabit önerileri kullanıyoruz)
+      setSuggestions(CHAT_SUGGESTIONS);
+    } catch (error) {
+      console.error('Mesaj gönderilirken hata:', error);
+      toast({
+        title: 'İletişim Hatası',
+        description: 'Mesajınız gönderilemedi. Lütfen daha sonra tekrar deneyin.',
+        variant: 'destructive'
+      });
+      
+      setIsTyping(false);
+      setIsThinking(false);
+      setShowBrainState(false);
+    }
+  };
+  
+  // Enter tuşu ile gönderme
+  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !isTyping) {
+      sendMessage();
+    }
+  };
+  
+  // Önerilen soruları kullan
+  const useSuggestion = (suggestion: string) => {
+    setInputMessage(suggestion);
+  };
+  
+  // Beyin durumu görselleştirici
+  const renderBrainState = () => {
+    if (!brainState) return null;
+    
+    return (
+      <div className="p-4 border rounded-lg bg-background/80 shadow-sm space-y-4 text-sm">
+        <div className="flex items-center gap-2 text-primary">
+          <Brain className="h-5 w-5" />
+          <h3 className="font-semibold">Düşünme Süreci</h3>
+        </div>
+        
+        <Accordion type="single" collapsible className="w-full">
+          {/* Aktif Konular */}
+          <AccordionItem value="topics">
+            <AccordionTrigger className="text-sm">
+              Tespit Edilen Konular
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-2">
+                {brainState.activeTopics.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {brainState.activeTopics.map((topic, index) => (
+                      <Badge key={index} variant="outline" className="flex items-center gap-1">
+                        {topic.name}
+                        <span className="text-xs text-muted-foreground">
+                          ({Math.round(topic.relevance * 100)}%)
+                        </span>
+                      </Badge>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground text-sm">Belirgin bir konu tespit edilemedi.</p>
+                )}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+          
+          {/* Müzikal Tercihler */}
+          <AccordionItem value="preferences">
+            <AccordionTrigger className="text-sm">
+              Müzikal Tercihler
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="space-y-2">
+                {brainState.userPreferences.length > 0 ? (
+                  <div className="space-y-2">
+                    {brainState.userPreferences.map((pref, index) => (
+                      <div key={index} className="flex items-center justify-between">
+                        <div>
+                          {pref.artist && <span>Sanatçı: {pref.artist}</span>}
+                          {pref.genre && <span>Tür: {pref.genre}</span>}
+                          {pref.mood && <span>Ruh Hali: {pref.mood}</span>}
+                          {pref.era && <span>Dönem: {pref.era}</span>}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Badge variant={pref.source === 'explicit' ? 'default' : 'secondary'} className="text-xs">
+                            {pref.source === 'explicit' ? 'Belirtilmiş' : 'Çıkarım'}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">
+                            {Math.round(pref.confidence * 100)}%
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground text-sm">Henüz bir müzikal tercih tespit edilemedi.</p>
+                )}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+          
+          {/* Duygu Analizi */}
+          {brainState.currentFeeling && (
+            <AccordionItem value="feeling">
+              <AccordionTrigger className="text-sm">
+                Duygu Analizi
+              </AccordionTrigger>
+              <AccordionContent>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="font-medium">Temel Duygu:</span> {brainState.currentFeeling.primary}
+                    </div>
+                    <Badge className="text-xs">
+                      {Math.round(brainState.currentFeeling.confidence * 100)}%
+                    </Badge>
+                  </div>
+                  
+                  {brainState.currentFeeling.secondary && (
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className="font-medium">İkincil Duygu:</span> {brainState.currentFeeling.secondary}
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs">
+                      <span>Düşük Yoğunluk</span>
+                      <span>Yüksek Yoğunluk</span>
+                    </div>
+                    <div className="w-full bg-secondary h-2 rounded-full overflow-hidden">
+                      <div 
+                        className="bg-primary h-full rounded-full" 
+                        style={{ width: `${brainState.currentFeeling.intensity * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </AccordionContent>
+            </AccordionItem>
+          )}
+        </Accordion>
+      </div>
+    );
+  };
+  
+  // Mesaj bileşeni
+  const MessageItem = ({ message }: { message: AiMessage }) => {
+    const isUser = message.role === 'user';
+    
+    return (
+      <div className={`flex items-start gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
+        <Avatar className="w-10 h-10 mt-1">
+          {isUser ? (
+            <AvatarFallback className="bg-primary text-primary-foreground">U</AvatarFallback>
+          ) : (
+            <AvatarFallback className="bg-secondary">AI</AvatarFallback>
+          )}
+        </Avatar>
+        
+        <div 
+          className={`
+            max-w-[80%] rounded-lg p-4 
+            ${isUser 
+              ? 'bg-primary text-primary-foreground' 
+              : 'bg-card border shadow-sm'
+            }
+          `}
+        >
+          <div className="text-sm whitespace-pre-wrap">{message.content}</div>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <Card className={`flex flex-col h-full overflow-hidden shadow-lg ${className}`}>
+      <CardHeader className="px-4 py-3 border-b">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-xl flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-primary" />
+              Akıllı Müzik Asistanı
+            </CardTitle>
+            <CardDescription>
+              Kişiselleştirilmiş müzik önerileri ve derin anlayış
+            </CardDescription>
+          </div>
+          
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button 
+                  variant="outline" 
+                  size="icon" 
+                  className="h-8 w-8" 
+                  onClick={() => setShowBrainState(!showBrainState)}
+                >
+                  <Brain className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <p>Yapay zeka düşünce sürecini göster/gizle</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
+      </CardHeader>
+      
+      <CardContent className="flex-1 p-0 overflow-hidden">
+        <ScrollArea className="h-full">
+          <div className="p-4 space-y-6">
+            {/* Mesajları göster */}
+            {messages.map((message, index) => (
+              <MessageItem key={index} message={message} />
+            ))}
+            
+            {/* Yazıyor göstergesi */}
+            {isTyping && (
+              <div className="flex items-start gap-3">
+                <Avatar className="w-10 h-10 mt-1">
+                  <AvatarFallback className="bg-secondary">AI</AvatarFallback>
+                </Avatar>
+                
+                <div className="max-w-[80%] rounded-lg p-4 bg-card border shadow-sm">
+                  {isThinking ? (
+                    <div className="flex items-center gap-2 text-muted-foreground">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>Düşünüyor ve yanıt hazırlıyor...</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 animate-pulse">
+                      <div className="w-2 h-2 rounded-full bg-primary"></div>
+                      <div className="w-2 h-2 rounded-full bg-primary animation-delay-200"></div>
+                      <div className="w-2 h-2 rounded-full bg-primary animation-delay-500"></div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            
+            {/* Düşünme süreci (isteğe bağlı görünüm) */}
+            {isThinking && showBrainState && brainState && (
+              <div className="ml-12">
+                {renderBrainState()}
+              </div>
+            )}
+            
+            {/* Şarkı önerileri */}
+            {recommendations.length > 0 && (
+              <div className="space-y-3">
+                <h3 className="text-sm font-medium flex items-center gap-2">
+                  <ThumbsUp className="h-4 w-4 text-primary" />
+                  Önerilen Şarkılar
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {recommendations.map(song => (
+                    <SongCard 
+                      key={song.id} 
+                      song={song} 
+                      onClick={() => playSong(song)} 
+                      isCompact
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            <div ref={messagesEndRef} />
+          </div>
+        </ScrollArea>
+      </CardContent>
+      
+      <CardFooter className="p-4 border-t flex flex-col gap-4">
+        {/* Sohbet önerileri */}
+        <div className="flex flex-wrap gap-2">
+          {suggestions.map((suggestion, index) => (
+            <Badge 
+              key={index} 
+              variant="secondary" 
+              className="px-3 py-1 cursor-pointer hover:bg-secondary/80 transition-colors"
+              onClick={() => useSuggestion(suggestion)}
+            >
+              {suggestion}
+            </Badge>
+          ))}
+        </div>
+        
+        {/* Mesaj girişi */}
+        <div className="flex items-center gap-2 w-full">
+          <Input
+            className="flex-1"
+            placeholder="Müzik önerisi için bir şeyler yazın..."
+            value={inputMessage}
+            onChange={(e) => setInputMessage(e.target.value)}
+            onKeyDown={handleKeyPress}
+            disabled={isTyping}
+          />
+          <Button 
+            className="px-4" 
+            onClick={sendMessage}
+            disabled={isTyping || !inputMessage.trim()}
+          >
+            {isTyping ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <Send className="h-5 w-5" />
+            )}
+          </Button>
+        </div>
+      </CardFooter>
+    </Card>
+  );
+};
+
+export default SuperAIAssistant;
+
+import { AiMessage } from './xata';
+import type { Song } from '@shared/schema';
+import { DEFAULT_GREETING } from './constants';
+
+// Gelişmiş AI yapısı için veri tipleri
+export interface Topic {
+  id: string;
+  name: string;
+  relevance: number; // 0-1 arası
+  relatedTopics: string[];
+  description: string;
+}
+
+export interface MusicalPreference {
+  artist?: string;
+  genre?: string;
+  mood?: string;
+  era?: string;
+  confidence: number; // 0-1 arası
+  source: string; // "explicit" - kullanıcının açıkça belirttiği, "implicit" - çıkarım yapılan
+  lastMentioned: Date;
+}
+
+export interface FeelingAnalysis {
+  primary: string;
+  secondary?: string;
+  intensity: number; // 0-1 arası
+  confidence: number; // 0-1 arası
+}
+
+export interface BrainState {
+  activeTopics: Topic[];
+  userPreferences: MusicalPreference[];
+  currentFeeling: FeelingAnalysis | null;
+  conversationHistory: {
+    messageCount: number;
+    topicChanges: number;
+    intensity: number; // 0-1 arası genel duygusal yoğunluk
+    lastMusicReceivedFeedback: string | null;
+  };
+  knowledgeBase: {
+    artistsKnown: string[];
+    genresKnown: string[];
+    moodsKnown: string[];
+    eraKnown: string[];
+  };
+}
+
+export interface SuperAIResponse {
+  text: string;
+  recommendations?: Song[];
+  followUpQuestions?: string[];
+  brainState?: BrainState;
+}
+
+// Temel NLP analizi
+export function analyzeMessage(message: string, history: AiMessage[]): BrainState {
+  // Başlangıç durumu
+  const initialState: BrainState = {
+    activeTopics: [],
+    userPreferences: [],
+    currentFeeling: null,
+    conversationHistory: {
+      messageCount: history.length,
+      topicChanges: 0,
+      intensity: 0.5,
+      lastMusicReceivedFeedback: null
+    },
+    knowledgeBase: {
+      artistsKnown: ['Tarkan', 'Dua Lipa', 'The Weeknd', 'Sezen Aksu', 'MFÖ', 'Coldplay', 'Imagine Dragons'],
+      genresKnown: ['pop', 'rock', 'jazz', 'klasik', 'hiphop', 'elektronik', 'metal', 'türkü', 'indie'],
+      moodsKnown: ['mutlu', 'hüzünlü', 'enerjik', 'sakin', 'romantik', 'nostaljik', 'heyecanlı'],
+      eraKnown: ['80ler', '90lar', '2000ler', '2010lar', 'yeni', 'eski']
+    }
+  };
+
+  // 1. Konu Analizi
+  const topics = extractTopics(message);
+  initialState.activeTopics = topics;
+
+  // 2. Müzikal tercihler
+  const preferences = extractMusicalPreferences(message, history);
+  initialState.userPreferences = preferences;
+
+  // 3. Duygu Analizi
+  const feeling = analyzeFeeling(message);
+  initialState.currentFeeling = feeling;
+
+  // 4. Konuşma dinamiği analizi
+  const updatedHistory = analyzeConversationDynamics(history);
+  initialState.conversationHistory = updatedHistory;
+
+  return initialState;
+}
+
+// Konu çıkarma algoritması
+function extractTopics(message: string): Topic[] {
+  const topics: Topic[] = [];
+  
+  // Müzik ile ilgili popüler konu grupları
+  const topicGroups = {
+    artist: ['sanatçı', 'şarkıcı', 'grup', 'müzisyen', 'vokalist'],
+    genre: ['tür', 'genre', 'tarz', 'pop', 'rock', 'jazz', 'klasik', 'hiphop', 'rap'],
+    mood: ['ruh hali', 'mood', 'hissetmek', 'mutlu', 'üzgün', 'enerjik', 'sakin', 'romantik'],
+    era: ['dönem', 'yıl', '80ler', '90lar', '2000ler', 'eski', 'yeni', 'retro', 'modern'],
+    activity: ['çalışma', 'uyku', 'parti', 'egzersiz', 'spor', 'yürüyüş', 'koşu', 'dinlenme'],
+    recommendation: ['öneri', 'tavsiye', 'öner', 'bul', 'keşfet', 'beğen', 'beğenebilir'],
+    information: ['bilgi', 'ne', 'nedir', 'kim', 'ne zaman', 'nasıl', 'hakkında', 'albüm', 'şarkı', 'popüler']
+  };
+  
+  // Mesajdaki kelimeleri analiz et
+  const words = message.toLowerCase().split(/\s+/);
+  
+  // Her kategori için kontrol
+  Object.entries(topicGroups).forEach(([category, keywords], index) => {
+    // Bu kategoriden herhangi bir kelime var mı?
+    const matchedKeywords = keywords.filter(keyword => 
+      words.some(word => word.includes(keyword) || keyword.includes(word))
+    );
+    
+    if (matchedKeywords.length > 0) {
+      // Eşleşen kelimeler varsa, bir konu oluştur
+      const relevance = Math.min(matchedKeywords.length / 3, 1); // En fazla 1 olacak şekilde
+      
+      topics.push({
+        id: `topic-${index}`,
+        name: category,
+        relevance,
+        relatedTopics: Object.keys(topicGroups).filter(k => k !== category && Math.random() > 0.7),
+        description: `Kullanıcı ${category} hakkında konuşuyor gibi görünüyor.`
+      });
+    }
+  });
+  
+  // Özel sanatçı/tür isimleri için kontrol
+  const potentialArtists = ['tarkan', 'dua lipa', 'sezen aksu', 'coldplay', 'imagine dragons'];
+  potentialArtists.forEach(artist => {
+    if (message.toLowerCase().includes(artist)) {
+      topics.push({
+        id: `artist-${artist}`,
+        name: 'artist',
+        relevance: 0.9,
+        relatedTopics: ['recommendation', 'information'],
+        description: `Kullanıcı ${artist} hakkında konuşuyor.`
+      });
+    }
+  });
+  
+  return topics;
+}
+
+// Müzikal tercihleri çıkarma
+function extractMusicalPreferences(message: string, history: AiMessage[]): MusicalPreference[] {
+  const preferences: MusicalPreference[] = [];
+  const lowerMessage = message.toLowerCase();
+  
+  // 1. Sanatçı tercihleri
+  const potentialArtists = [
+    'tarkan', 'dua lipa', 'the weeknd', 'sezen aksu', 'mfö', 'coldplay', 'imagine dragons'
+  ];
+  
+  potentialArtists.forEach(artist => {
+    if (lowerMessage.includes(artist)) {
+      // Sevme ifadelerini ara
+      const likePatterns = ['sev', 'beğen', 'dinle', 'hoşlan', 'güzel', 'harika'];
+      const dislikePatterns = ['sevme', 'beğenme', 'hoşlanma', 'kötü', 'berbat'];
+      
+      let isLiked = likePatterns.some(pattern => lowerMessage.includes(pattern));
+      let isDisliked = dislikePatterns.some(pattern => lowerMessage.includes(pattern));
+      
+      // Eğer açık bir tercih belirtilmemişse, muhtemelen ilgileniyordur
+      const confidence = isLiked ? 0.9 : (isDisliked ? 0.1 : 0.7);
+      
+      preferences.push({
+        artist,
+        confidence,
+        source: 'explicit',
+        lastMentioned: new Date()
+      });
+    }
+  });
+  
+  // 2. Tür tercihleri
+  const genres = ['pop', 'rock', 'jazz', 'klasik', 'hiphop', 'elektronik', 'metal', 'türkü'];
+  genres.forEach(genre => {
+    if (lowerMessage.includes(genre)) {
+      preferences.push({
+        genre,
+        confidence: 0.8,
+        source: 'explicit',
+        lastMentioned: new Date()
+      });
+    }
+  });
+  
+  // 3. Ruh hali tercihleri
+  const moods = ['mutlu', 'hüzünlü', 'enerjik', 'sakin', 'romantik', 'nostaljik', 'melankoli'];
+  moods.forEach(mood => {
+    if (lowerMessage.includes(mood) || (mood === 'mutlu' && lowerMessage.includes('keyif'))) {
+      preferences.push({
+        mood,
+        confidence: lowerMessage.includes('hisset') ? 0.95 : 0.8,
+        source: 'explicit',
+        lastMentioned: new Date()
+      });
+    }
+  });
+  
+  // 4. Dönem/yıl tercihleri
+  const eras = ['80', '90', '2000', 'retro', 'yeni', 'modern', 'eski'];
+  eras.forEach(era => {
+    if (lowerMessage.includes(era)) {
+      preferences.push({
+        era: `${era}${era.length <= 2 ? 'ler' : ''}`, // 80 -> 80ler
+        confidence: 0.85,
+        source: 'explicit',
+        lastMentioned: new Date()
+      });
+    }
+  });
+  
+  // 5. Geçmiş mesajlardan çıkarım yap
+  if (history.length > 0) {
+    const userMessages = history
+      .filter(msg => msg.role === 'user')
+      .map(msg => msg.content.toLowerCase());
+    
+    // Son 3 mesajı kontrol et
+    userMessages.slice(-3).forEach(msg => {
+      // Sanatçı, tür vb. analizi tekrar yap ama daha düşük güven skoruyla
+      potentialArtists.forEach(artist => {
+        if (msg.includes(artist) && !preferences.some(p => p.artist === artist)) {
+          preferences.push({
+            artist,
+            confidence: 0.6,
+            source: 'implicit',
+            lastMentioned: new Date()
+          });
+        }
+      });
+    });
+  }
+  
+  return preferences;
+}
+
+// Duygu analizi
+function analyzeFeeling(message: string): FeelingAnalysis | null {
+  const lowerMessage = message.toLowerCase();
+  
+  // Temel duygu sözlüğü
+  const emotionKeywords = {
+    'mutlu': ['mutlu', 'neşeli', 'keyifli', 'sevinçli', 'harika', 'güzel', 'pozitif'],
+    'hüzünlü': ['üzgün', 'hüzünlü', 'melankolik', 'mutsuz', 'kederli', 'acı', 'kötü'],
+    'öfkeli': ['kızgın', 'öfkeli', 'sinirli', 'bıktım', 'nefret'],
+    'sakin': ['sakin', 'huzurlu', 'dingin', 'rahat', 'gevşek', 'dinlenmek'],
+    'heyecanlı': ['heyecanlı', 'coşkulu', 'enerjik', 'aktif', 'motivasyonlu'],
+    'yorgun': ['yorgun', 'bitkin', 'uykulu', 'tükenmiş', 'bezgin'],
+    'kaygılı': ['endişeli', 'kaygılı', 'gergin', 'stresli', 'tedirgin']
+  };
+  
+  // Duygu yoğunluk göstergeleri
+  const intensityMarkers = {
+    high: ['çok', 'aşırı', 'oldukça', 'gerçekten', 'son derece', '!'],
+    low: ['biraz', 'az', 'hafif', 'kısmen']
+  };
+  
+  // Duygusal ifadeleri analiz et
+  let maxMatches = 0;
+  let primaryEmotion = '';
+  
+  Object.entries(emotionKeywords).forEach(([emotion, keywords]) => {
+    const matches = keywords.filter(word => lowerMessage.includes(word)).length;
+    if (matches > maxMatches) {
+      maxMatches = matches;
+      primaryEmotion = emotion;
+    }
+  });
+  
+  // Eğer bir duygu tespit edilmediyse null döndür
+  if (maxMatches === 0) {
+    return null;
+  }
+  
+  // Yoğunluk analizi
+  let intensity = 0.5; // Varsayılan orta seviye
+  const hasHighIntensity = intensityMarkers.high.some(marker => lowerMessage.includes(marker));
+  const hasLowIntensity = intensityMarkers.low.some(marker => lowerMessage.includes(marker));
+  
+  if (hasHighIntensity) {
+    intensity = 0.8;
+  } else if (hasLowIntensity) {
+    intensity = 0.3;
+  }
+  
+  // Ünlem sayısı yoğunluğu artırır
+  const exclamationCount = (lowerMessage.match(/!/g) || []).length;
+  intensity = Math.min(intensity + (exclamationCount * 0.1), 1.0);
+  
+  // İkincil duygu analizi
+  let secondaryEmotion: string | undefined;
+  let secondaryMatches = 0;
+  
+  Object.entries(emotionKeywords).forEach(([emotion, keywords]) => {
+    if (emotion !== primaryEmotion) {
+      const matches = keywords.filter(word => lowerMessage.includes(word)).length;
+      if (matches > secondaryMatches) {
+        secondaryMatches = matches;
+        secondaryEmotion = emotion;
+      }
+    }
+  });
+  
+  // Güven skoru hesaplama
+  let confidence = 0.5;
+  confidence += (maxMatches * 0.1); // Her eşleşme güveni artırır
+  confidence += (exclamationCount * 0.05); // Ünlemler güveni biraz artırır
+  confidence = Math.min(confidence, 0.95); // En fazla 0.95 güven
+  
+  return {
+    primary: primaryEmotion,
+    secondary: secondaryMatches > 0 ? secondaryEmotion : undefined,
+    intensity,
+    confidence
+  };
+}
+
+// Konuşma dinamiği analizi
+function analyzeConversationDynamics(history: AiMessage[]): BrainState['conversationHistory'] {
+  const dynamics = {
+    messageCount: history.length,
+    topicChanges: 0,
+    intensity: 0.5,
+    lastMusicReceivedFeedback: null
+  };
+  
+  if (history.length < 2) {
+    return dynamics;
+  }
+  
+  // Konu değişiklikleri analizi
+  const userMessages = history.filter(msg => msg.role === 'user');
+  let previousTopics: Topic[] = [];
+  
+  userMessages.forEach(msg => {
+    const currentTopics = extractTopics(msg.content);
+    
+    // Önceki konularla ne kadar örtüşüyor?
+    const topicOverlap = previousTopics.some(prevTopic => 
+      currentTopics.some(currTopic => currTopic.name === prevTopic.name)
+    );
+    
+    if (!topicOverlap && previousTopics.length > 0) {
+      dynamics.topicChanges++;
+    }
+    
+    previousTopics = currentTopics;
+  });
+  
+  // Duygusal yoğunluk analizi
+  const recentMessages = userMessages.slice(-3);
+  let totalIntensity = 0;
+  let intensityMeasurements = 0;
+  
+  recentMessages.forEach(msg => {
+    const feeling = analyzeFeeling(msg.content);
+    if (feeling) {
+      totalIntensity += feeling.intensity;
+      intensityMeasurements++;
+    }
+  });
+  
+  if (intensityMeasurements > 0) {
+    dynamics.intensity = totalIntensity / intensityMeasurements;
+  }
+  
+  // Müzik geri bildirim analizi
+  const recentUserMessages = userMessages.slice(-2);
+  const assistantMessages = history.filter(msg => msg.role === 'assistant').slice(-2);
+  
+  // Asistan müzik önerdiyse ve kullanıcı yanıt verdiyse
+  if (assistantMessages.length > 0 && recentUserMessages.length > 0) {
+    const lastAssistantMsg = assistantMessages[assistantMessages.length - 1].content.toLowerCase();
+    const lastUserMsg = recentUserMessages[recentUserMessages.length - 1].content.toLowerCase();
+    
+    // Asistan müzik önerdiyse
+    if (lastAssistantMsg.includes('öner') || lastAssistantMsg.includes('dinle')) {
+      // Kullanıcı tepkisi
+      const positiveWords = ['teşekkür', 'sağol', 'iyi', 'güzel', 'harika', 'süper', 'beğen', 'hoş'];
+      const negativeWords = ['kötü', 'beğenmedim', 'sevmedim', 'berbat', 'değiştir', 'başka'];
+      
+      const hasPositive = positiveWords.some(word => lastUserMsg.includes(word));
+      const hasNegative = negativeWords.some(word => lastUserMsg.includes(word));
+      
+      if (hasPositive && !hasNegative) {
+        dynamics.lastMusicReceivedFeedback = 'positive';
+      } else if (hasNegative && !hasPositive) {
+        dynamics.lastMusicReceivedFeedback = 'negative';
+      } else if (hasPositive && hasNegative) {
+        dynamics.lastMusicReceivedFeedback = 'neutral';
+      }
+    }
+  }
+  
+  return dynamics;
+}
+
+// Yanıt oluşturma fonksiyonu
+export function generateResponse(message: string, history: AiMessage[]): SuperAIResponse {
+  // 1. Temel analiz
+  const brainState = analyzeMessage(message, history);
+  
+  // 2. Yanıt metnini hazırla
+  let responseText = '';
+  
+  // Son kullanıcı mesajını ve önceki asistan mesajını al
+  const lastUserMessage = message;
+  const previousAssistantMessage = history
+    .filter(msg => msg.role === 'assistant')
+    .pop()?.content || '';
+  
+  // 3. Yanıt oluşturma stratejisi seç
+  
+  // a. Eğer kullanıcı duygu belirtiyorsa
+  if (brainState.currentFeeling) {
+    const { primary, intensity } = brainState.currentFeeling;
+    
+    const feelingResponses: Record<string, string[]> = {
+      'mutlu': [
+        'Mutlu olduğunuzu duymak harika! Size enerjik müzikler önerebilirim.',
+        'Keyfinizi yükseltecek şarkılar dinlemek ister misiniz?',
+        'Bu güzel ruh halinizi sürdürecek neşeli şarkılar önerebilirim.'
+      ],
+      'hüzünlü': [
+        'Üzgün hissettiğinizi görüyorum. Sizi rahatlatacak müzikler önerebilirim.',
+        'Bu duygularınıza eşlik edecek veya sizi sakinleştirecek şarkılar mı tercih edersiniz?',
+        'Hüzünlü hissettiğinizde dinlemek istediğiniz belirli bir sanatçı var mı?'
+      ],
+      'öfkeli': [
+        'Biraz gergin görünüyorsunuz. Sakinleştirici müzikler mi yoksa bu enerjiyi dışa vuracak parçalar mı istersiniz?',
+        'Bu duygularınızı yansıtan güçlü parçalar önerebilirim.',
+        'Kimi zaman müzik en iyi terapi olabilir. Size özel bir seçki hazırlayabilirim.'
+      ],
+      'sakin': [
+        'Huzurlu bir ruh halinde olduğunuzu görmek güzel. Benzer tonda şarkılar önerebilirim.',
+        'Bu sakin anınıza eşlik edecek dinlendirici müzikler ister misiniz?',
+        'Dinginliğinizi devam ettirecek akustik veya klasik parçalar önerebilirim.'
+      ],
+      'heyecanlı': [
+        'Enerji dolu görünüyorsunuz! Buna uygun hareketli şarkılar önerebilirim.',
+        'Bu coşkuyu yansıtan dinamik şarkılar dinlemek ister misiniz?',
+        'Heyecanınıza eşlik edecek ritimli parçalar seçebilirim.'
+      ]
+    };
+    
+    // Eğer duygu için özel yanıtlar varsa
+    if (primary in feelingResponses) {
+      const responses = feelingResponses[primary];
+      responseText = responses[Math.floor(Math.random() * responses.length)];
+      
+      // Yoğunluğa göre yanıt şekillendirme
+      if (intensity > 0.7) {
+        responseText += ' Duygunuzun çok yoğun olduğunu görüyorum.';
+      }
+    }
+  }
+  
+  // b. Eğer kullanıcı sanatçı/tür belirtiyorsa 
+  const artistPrefs = brainState.userPreferences.filter(p => p.artist);
+  const genrePrefs = brainState.userPreferences.filter(p => p.genre);
+  
+  if (artistPrefs.length > 0) {
+    const artistName = artistPrefs[0].artist;
+    responseText = responseText || `${artistName} dinlemek istediğinizi görüyorum. Size bu sanatçının şarkılarını bulabilirim.`;
+  } else if (genrePrefs.length > 0) {
+    const genreName = genrePrefs[0].genre;
+    responseText = responseText || `${genreName} türünde müzik dinlemek istediğinizi anlıyorum. Size bu tarzda şarkılar önerebilirim.`;
+  }
+  
+  // c. Eğer kullanıcı soru soruyorsa
+  if (lastUserMessage.includes('?')) {
+    if (lastUserMessage.toLowerCase().includes('öneri') || lastUserMessage.toLowerCase().includes('tavsiye')) {
+      responseText = responseText || 'Size müzik önerileri sunmaktan memnuniyet duyarım. Hangi tarz müzik dinlemeyi seversiniz?';
+    } else if (lastUserMessage.toLowerCase().includes('nasıl')) {
+      responseText = responseText || 'Size müzik konusunda yardımcı olmak için buradayım. Şarkı önerisi, sanatçı bilgisi veya ruh halinize uygun müzikler için bana sorun.';
+    }
+  }
+  
+  // d. Hiçbir özel durum tespit edilmediyse
+  if (!responseText) {
+    const defaultResponses = [
+      'Size müzik konusunda nasıl yardımcı olabilirim? Belirli bir sanatçı mı arıyorsunuz, yoksa ruh halinize uygun öneriler mi istersiniz?',
+      'Müzik zevkiniz hakkında daha fazla bilgi edinmek isterim. Hangi tür müzikleri dinlemeyi seversiniz?',
+      'Bugün size nasıl yardımcı olabilirim? Ruh halinize göre şarkılar önerebilir veya sevdiğiniz sanatçıları bulabilirim.'
+    ];
+    
+    responseText = defaultResponses[Math.floor(Math.random() * defaultResponses.length)];
+  }
+  
+  // 4. Takip soruları oluştur
+  const followUpQuestions = generateFollowUpQuestions(brainState);
+  
+  // 5. Uygun şarkı önerileri oluştur (burada sadece bir simülasyon)
+  const recommendations: Song[] = [];
+  
+  // 6. Final yanıtı döndür
+  return {
+    text: responseText,
+    recommendations,
+    followUpQuestions,
+    brainState
+  };
+}
+
+// Takip soruları oluşturma
+function generateFollowUpQuestions(brainState: BrainState): string[] {
+  const questions: string[] = [];
+  
+  // Kategorilere göre sorular
+  const questionsByCategory: Record<string, string[]> = {
+    artist: [
+      'Başka hangi sanatçıları seviyorsunuz?',
+      'Bu sanatçının hangi şarkılarını en çok beğeniyorsunuz?',
+      'Benzer tarzda başka sanatçılar önermemi ister misiniz?'
+    ],
+    genre: [
+      'Bu tür dışında dinlediğiniz başka müzik türleri var mı?', 
+      'Bu türde en sevdiğiniz sanatçı kim?',
+      'Daha hareketli/sakin parçalar mı tercih edersiniz?'
+    ],
+    mood: [
+      'Şu anki ruh haliniz nasıl?',
+      'Dinlerken nasıl hissetmek istersiniz?',
+      'Müziğin ruh halinizi nasıl etkilemesini istiyorsunuz?'
+    ],
+    recommendation: [
+      'Önerdiğim şarkıları beğendiniz mi?',
+      'Bu tarza benzer başka öneriler ister misiniz?',
+      'Şarkı önerilerinde neye önem verirsiniz?'
+    ]
+  };
+  
+  // Aktif konulara göre sorular ekle
+  brainState.activeTopics.forEach(topic => {
+    if (topic.name in questionsByCategory && questions.length < 2) {
+      const categoryQuestions = questionsByCategory[topic.name];
+      const randomQuestion = categoryQuestions[Math.floor(Math.random() * categoryQuestions.length)];
+      
+      // Aynı soruyu ekleme
+      if (!questions.includes(randomQuestion)) {
+        questions.push(randomQuestion);
+      }
+    }
+  });
+  
+  // Kullanıcı tercihleriyle ilgili sorular
+  brainState.userPreferences.forEach(pref => {
+    if (questions.length < 2) {
+      if (pref.artist && !questions.some(q => q.includes(pref.artist!))) {
+        questions.push(`${pref.artist} dışında başka hangi sanatçıları dinlemeyi seversiniz?`);
+      } else if (pref.genre && !questions.some(q => q.includes(pref.genre!))) {
+        questions.push(`${pref.genre} müziğin hangi özelliklerini beğeniyorsunuz?`);
+      }
+    }
+  });
+  
+  // Eğer hala soru yoksa genel sorular ekle
+  if (questions.length === 0) {
+    questions.push('Hangi tür müzikleri dinlemeyi seversiniz?');
+    questions.push('Belirli bir ruh haline uygun müzik önerisi ister misiniz?');
+  }
+  
+  return questions.slice(0, 2); // En fazla 2 soru döndür
+}
+
+// Selamlama mesajı
+export function getSmartWelcomeMessage(): string {
+  return DEFAULT_GREETING + "\n\nHoş geldiniz! Size kişiselleştirilmiş müzik önerileri sunabilirim. Ruh halinizi, sevdiğiniz sanatçıları veya müzik tarzlarınızı paylaşarak başlayabilirsiniz.";
+}
+
+import React, { useState } from 'react';
+import { AIAssistant } from '@/components/AIAssistant';
+import AdvancedAI from '@/components/AdvancedAI';
+import SuperAIAssistant from '@/components/SuperAIAssistant';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Sparkles, Brain, Zap } from 'lucide-react';
+import Layout from '@/components/Layout';
+
+export default function AIPage() {
+  document.title = 'Yapay Zeka Asistanı - Müzik Asistanım';
+  const [activeTab, setActiveTab] = useState('super');
+  
+  return (
+    <div className="container mx-auto px-4 py-8">
+      <div className="mb-6">
+        <h1 className="text-3xl font-bold mb-2">Yapay Zeka Asistanım</h1>
+        <p className="text-muted-foreground">
+          Yapay zeka asistanlarımız ile müzik keşfedin, ruh halinize göre kişiselleştirilmiş öneriler alın.
+        </p>
+      </div>
+      
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+            <TabsList className="w-full mb-4">
+              <TabsTrigger value="basic" className="flex items-center gap-2">
+                <Zap className="h-4 w-4" />
+                <span>Temel Asistan</span>
+              </TabsTrigger>
+              <TabsTrigger value="advanced" className="flex items-center gap-2">
+                <Brain className="h-4 w-4" />
+                <span>Gelişmiş Asistan</span>
+              </TabsTrigger>
+              <TabsTrigger value="super" className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4" />
+                <span>Süper Asistan</span>
+              </TabsTrigger>
+            </TabsList>
+            
+            <TabsContent value="basic">
+              <AIAssistant className="h-[600px]" />
+            </TabsContent>
+            
+            <TabsContent value="advanced">
+              <AdvancedAI className="h-[600px]" />
+            </TabsContent>
+            
+            <TabsContent value="super">
+              <SuperAIAssistant className="h-[600px]" />
+            </TabsContent>
+          </Tabs>
+        </div>
+        
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xl font-semibold">Asistanın Yetenekleri</CardTitle>
+              <CardDescription>
+                {activeTab === 'basic' && 'Temel asistanınız ruh halinize ve müzik tercihlerinize göre öneriler sunar.'}
+                {activeTab === 'advanced' && 'Gelişmiş asistanınız düşünce sürecini göstererek daha detaylı analizler yapabilir.'}
+                {activeTab === 'super' && 'Süper asistanınız en detaylı bağlam analizi ve duygu tespiti yapabilen üst düzey bir sistemdir.'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ul className="space-y-2 text-sm">
+                <li className="flex items-start gap-2">
+                  <span className="bg-primary/20 text-primary p-1 rounded-full mt-0.5">✓</span>
+                  <span>Ruh halinize göre kişiselleştirilmiş müzik önerileri</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="bg-primary/20 text-primary p-1 rounded-full mt-0.5">✓</span>
+                  <span>Sanatçı veya tür bazlı akıllı aramalar</span>
+                </li>
+                <li className="flex items-start gap-2">
+                  <span className="bg-primary/20 text-primary p-1 rounded-full mt-0.5">✓</span>
+                  <span>Konuşma bağlamını anlama ve hatırlama</span>
+                </li>
+                {(activeTab === 'advanced' || activeTab === 'super') && (
+                  <li className="flex items-start gap-2">
+                    <span className="bg-primary/20 text-primary p-1 rounded-full mt-0.5">✓</span>
+                    <span>Düşünce sürecini şeffaf bir şekilde görüntüleme</span>
+                  </li>
+                )}
+                {activeTab === 'super' && (
+                  <>
+                    <li className="flex items-start gap-2">
+                      <span className="bg-primary/20 text-primary p-1 rounded-full mt-0.5">✓</span>
+                      <span>Beyin durumu modelleme ve derin anlayış</span>
+                    </li>
+                    <li className="flex items-start gap-2">
+                      <span className="bg-primary/20 text-primary p-1 rounded-full mt-0.5">✓</span>
+                      <span>Duygu yoğunluğu ve güveni analizi</span>
+                    </li>
+                  </>
+                )}
+              </ul>
+            </CardContent>
+          </Card>
+          
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xl font-semibold">İpuçları</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3 text-sm">
+                <p>• "Bugün kendimi enerjik hissediyorum" gibi ifadelerle ruh halinizi belirtin</p>
+                <p>• "Dua Lipa'nın en popüler şarkıları neler?" gibi sorular sorun</p>
+                <p>• "Pop müzik öner" diyerek tür bazlı öneriler alın</p>
+                <p>• Basit cevaplar yerine, detaylı istekler iletin</p>
+                {(activeTab === 'advanced' || activeTab === 'super') && (
+                  <p>• Asistanın düşünce sürecini görmek için "Düşünce süreci" bölümünü açın</p>
+                )}
+                {activeTab === 'super' && (
+                  <p>• "Beyin durumu" görünümünü açarak asistanınızın sizi nasıl anladığını izleyin</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+          
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-xl font-semibold">Teknoloji</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm text-muted-foreground mb-3">
+                Yapay zeka asistanlarımız, bağlam anlama, konu takibi ve müzik önerileri için tamamen ücretsiz, yerel olarak çalışan gelişmiş algoritmalar kullanır.
+              </p>
+              
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="outline">Doğal Dil İşleme</Badge>
+                <Badge variant="outline">Duygu Analizi</Badge>
+                <Badge variant="outline">Bağlam Anlama</Badge>
+                <Badge variant="outline">Kişiselleştirme</Badge>
+                {activeTab === 'super' && (
+                  <>
+                    <Badge variant="outline">Bilişsel Modelleme</Badge>
+                    <Badge variant="outline">Yüksek Doğruluk</Badge>
+                  </>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+} 
+eski olanı güncelle yeni olanı da ekle 
